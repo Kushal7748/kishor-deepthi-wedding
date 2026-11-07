@@ -23,7 +23,6 @@ export const CanvasFilmJourney: React.FC = () => {
   const progressFillRef = useRef<HTMLSpanElement | null>(null);
   const loaderFillRef = useRef<HTMLSpanElement | null>(null);
   const detailsDialogRef = useRef<HTMLDialogElement | null>(null);
-  const audioRef = useRef<HTMLAudioElement | null>(null);
   const chapterCopiesRef = useRef<HTMLElement[]>([]);
 
   const playerRef = useRef<FramePlayer | null>(null);
@@ -37,8 +36,6 @@ export const CanvasFilmJourney: React.FC = () => {
   const [loadLabel, setLoadLabel] = useState('Preparing your journey…');
   const [activeChapter, setActiveChapter] = useState(0);
   const [mediaStatus, setMediaStatus] = useState('');
-  const [isMuted, setIsMuted] = useState(false);
-  const [isAudioPlaying, setIsAudioPlaying] = useState(false);
 
   // Cache chapter copy elements on mount
   useEffect(() => {
@@ -48,58 +45,39 @@ export const CanvasFilmJourney: React.FC = () => {
   }, []);
 
   // ─────────────────────────────────────────────────────────────
-  // 1. AUDIO AUTOPLAY (Starts directly upon opening, unmuted on first gesture if restricted)
+  // 1. BACKGROUND MUSIC (Automatic Playback Directly from Open)
   // ─────────────────────────────────────────────────────────────
-  const startAudioPlayback = useCallback(() => {
-    const audio = audioRef.current;
-    if (!audio) return;
-
-    audio.muted = false;
-    audio.volume = 1.0;
-
-    const playPromise = audio.play();
-    if (playPromise !== undefined) {
-      playPromise
-        .then(() => {
-          setIsAudioPlaying(true);
-          setIsMuted(false);
-        })
-        .catch(() => {
-          // Waiting for first user touch to unlock unmuted sound
-        });
+  const playBackgroundMusic = useCallback(() => {
+    const audio = document.getElementById('bg-music-audio') as HTMLAudioElement | null;
+    if (audio && audio.paused) {
+      audio.muted = false;
+      audio.volume = 1.0;
+      audio.play().catch(() => {});
     }
   }, []);
 
   useEffect(() => {
-    // Attempt instant playback directly as soon as the component loads
-    startAudioPlayback();
+    // Attempt playback immediately upon opening
+    playBackgroundMusic();
 
-    // Universal gesture unlocker: starts unmuted sound the instant user touches anywhere
-    const unlockAudio = () => {
-      const audio = audioRef.current;
-      if (audio) {
-        audio.muted = false;
-        audio.volume = 1.0;
-        audio.play().then(() => {
-          setIsAudioPlaying(true);
-          setIsMuted(false);
-        }).catch(() => {});
-      }
+    // Universal unlocker: ensures unmuted playback starts on the very first touch/gesture
+    const onUserInteract = () => {
+      playBackgroundMusic();
     };
 
     const events = ['touchstart', 'touchend', 'click', 'pointerdown', 'mousedown', 'scroll', 'keydown'];
     events.forEach((ev) => {
-      window.addEventListener(ev, unlockAudio, { capture: true, passive: true });
-      document.addEventListener(ev, unlockAudio, { capture: true, passive: true });
+      window.addEventListener(ev, onUserInteract, { capture: true, passive: true });
+      document.addEventListener(ev, onUserInteract, { capture: true, passive: true });
     });
 
     return () => {
       events.forEach((ev) => {
-        window.removeEventListener(ev, unlockAudio, true);
-        document.removeEventListener(ev, unlockAudio, true);
+        window.removeEventListener(ev, onUserInteract, true);
+        document.removeEventListener(ev, onUserInteract, true);
       });
     };
-  }, [startAudioPlayback]);
+  }, [playBackgroundMusic]);
 
   // ─────────────────────────────────────────────────────────────
   // 2. HERO DEPTH MOTION (subtle parallax)
@@ -226,7 +204,7 @@ export const CanvasFilmJourney: React.FC = () => {
         }, 800);
 
         // Directly kick off audio playback
-        startAudioPlayback();
+        playBackgroundMusic();
       },
       onFrame(time) {
         updateChapter(time);
@@ -274,7 +252,7 @@ export const CanvasFilmJourney: React.FC = () => {
       clearTimeout(idleResumeTimerRef.current);
       player.dispose();
     };
-  }, [updateChapter, updateHeroDepth, startAudioPlayback]);
+  }, [updateChapter, updateHeroDepth, playBackgroundMusic]);
 
   // ─────────────────────────────────────────────────────────────
   // 5. TOUCH & SCROLL CONTROLLERS (WITH SEAMLESS AUTO-RESUME)
@@ -397,34 +375,11 @@ export const CanvasFilmJourney: React.FC = () => {
     }
   };
 
-  // Music mute/play toggle
-  const toggleMusic = (e: React.MouseEvent) => {
-    e.stopPropagation();
-    const audio = audioRef.current;
-    if (!audio) return;
-
-    if (audio.paused) {
-      audio.muted = false;
-      audio.volume = 1.0;
-      audio.play().then(() => {
-        setIsAudioPlaying(true);
-        setIsMuted(false);
-      }).catch(() => {});
-    } else {
-      if (audio.muted) {
-        audio.muted = false;
-        setIsMuted(false);
-      } else {
-        audio.muted = true;
-        setIsMuted(true);
-      }
-    }
-  };
-
   // Open/Close Dialogs
   const openCelebrations = (e: React.MouseEvent) => {
     e.preventDefault();
     playerRef.current?.pause();
+    playBackgroundMusic();
     detailsDialogRef.current?.showModal();
     document.body.style.overflow = 'hidden';
   };
@@ -505,7 +460,7 @@ export const CanvasFilmJourney: React.FC = () => {
           aria-label="A journey to our beginning"
         >
           <div ref={stageRef} className="journey-stage">
-            {/* ── HEADER (Uncluttered, No Auto-Scroll Button) ────── */}
+            {/* ── HEADER (Pure & Minimal — No Buttons) ──────────── */}
             <header className="site-header">
               <a
                 className="header-link header-badge"
@@ -515,21 +470,6 @@ export const CanvasFilmJourney: React.FC = () => {
               >
                 Wedding Details <span aria-hidden="true">↗</span>
               </a>
-
-              <button
-                type="button"
-                className={`music-toggle-btn ${isAudioPlaying && !isMuted ? 'is-playing' : 'is-muted'}`}
-                aria-label={isAudioPlaying && !isMuted ? 'Mute background song' : 'Play background song'}
-                onClick={toggleMusic}
-                title={isAudioPlaying && !isMuted ? 'Song playing (Tap to mute)' : 'Song muted (Tap to play)'}
-              >
-                <span className="music-wave" aria-hidden="true">
-                  <i />
-                  <i />
-                  <i />
-                </span>
-                <span>{isAudioPlaying && !isMuted ? '♪ Music' : '♪ Music OFF'}</span>
-              </button>
             </header>
 
             {/* ── CINEMATIC FILM CANVAS ─────────────────────────── */}
@@ -871,33 +811,6 @@ export const CanvasFilmJourney: React.FC = () => {
           </button>
         </div>
       </dialog>
-
-      {/* ── BACKGROUND MUSIC (Plays from 0:00 without seek loop) ── */}
-      <audio
-        ref={audioRef}
-        src="/audio/bg-music.mp3"
-        preload="auto"
-        autoPlay
-        loop
-        playsInline
-        aria-hidden="true"
-        style={{
-          position: 'fixed',
-          top: -9999,
-          left: -9999,
-          width: 1,
-          height: 1,
-          opacity: 0,
-          pointerEvents: 'none',
-        }}
-        onPlay={() => {
-          setIsAudioPlaying(true);
-          setIsMuted(false);
-        }}
-        onPause={() => {
-          setIsAudioPlaying(false);
-        }}
-      />
     </>
   );
 };
