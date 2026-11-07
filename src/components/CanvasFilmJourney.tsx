@@ -23,14 +23,12 @@ export const CanvasFilmJourney: React.FC = () => {
   const progressFillRef = useRef<HTMLSpanElement | null>(null);
   const loaderFillRef = useRef<HTMLSpanElement | null>(null);
   const detailsDialogRef = useRef<HTMLDialogElement | null>(null);
-  const audioRef = useRef<HTMLAudioElement | null>(null);
   const chapterCopiesRef = useRef<HTMLElement[]>([]);
 
   const playerRef = useRef<FramePlayer | null>(null);
   const lastChapterRef = useRef<number>(-1);
   const idleResumeTimerRef = useRef<number>(0);
   const autoPlayEnabledRef = useRef<boolean>(true);
-  const hasUserTappedAudioRef = useRef<boolean>(false);
 
   const [loading, setLoading] = useState(true);
   const [loadPct, setLoadPct] = useState(0);
@@ -46,15 +44,11 @@ export const CanvasFilmJourney: React.FC = () => {
   }, []);
 
   // ─────────────────────────────────────────────────────────────
-  // 1. TAP-TO-PLAY AUDIO CONTROLLER
+  // 1. AUTOMATIC BACKGROUND MUSIC
   // ─────────────────────────────────────────────────────────────
-  // Silent by default. Song ONLY starts when the user taps anywhere on the screen.
-  // If the user does not tap, the visual journey completes silently without song.
-  const triggerAudioOnTap = useCallback(() => {
-    const audio = audioRef.current;
-    if (!audio) return;
-    hasUserTappedAudioRef.current = true;
-    if (audio.paused) {
+  const playMusic = useCallback(() => {
+    const audio = document.getElementById('bg-music-audio') as HTMLAudioElement | null;
+    if (audio) {
       audio.muted = false;
       audio.volume = 1.0;
       audio.play().catch(() => {});
@@ -62,26 +56,27 @@ export const CanvasFilmJourney: React.FC = () => {
   }, []);
 
   useEffect(() => {
-    const onFirstUserTap = () => {
-      triggerAudioOnTap();
-      ['pointerdown', 'touchstart', 'click'].forEach((ev) => {
-        window.removeEventListener(ev, onFirstUserTap, true);
-        document.removeEventListener(ev, onFirstUserTap, true);
-      });
+    // Attempt automatic playback immediately on mount
+    playMusic();
+
+    // Universal unlocker: starts unmuted sound the instant user touches/interacts anywhere
+    const onUserInteract = () => {
+      playMusic();
     };
 
-    ['pointerdown', 'touchstart', 'click'].forEach((ev) => {
-      window.addEventListener(ev, onFirstUserTap, { capture: true, passive: true });
-      document.addEventListener(ev, onFirstUserTap, { capture: true, passive: true });
+    const events = ['touchstart', 'touchend', 'click', 'pointerdown', 'mousedown', 'scroll', 'keydown'];
+    events.forEach((ev) => {
+      window.addEventListener(ev, onUserInteract, { capture: true, passive: true });
+      document.addEventListener(ev, onUserInteract, { capture: true, passive: true });
     });
 
     return () => {
-      ['pointerdown', 'touchstart', 'click'].forEach((ev) => {
-        window.removeEventListener(ev, onFirstUserTap, true);
-        document.removeEventListener(ev, onFirstUserTap, true);
+      events.forEach((ev) => {
+        window.removeEventListener(ev, onUserInteract, true);
+        document.removeEventListener(ev, onUserInteract, true);
       });
     };
-  }, [triggerAudioOnTap]);
+  }, [playMusic]);
 
   // ─────────────────────────────────────────────────────────────
   // 2. HERO DEPTH MOTION (subtle parallax)
@@ -155,9 +150,9 @@ export const CanvasFilmJourney: React.FC = () => {
         progressFillRef.current.style.transform = `scaleX(${progress})`;
       }
 
-      // Synchronize audio fade-out at the end of the 50.4s single loop
-      const audio = audioRef.current;
-      if (audio && !audio.paused && hasUserTappedAudioRef.current) {
+      // Synchronize audio fade-out over the last 1.4s of the 50.4s single loop
+      const audio = document.getElementById('bg-music-audio') as HTMLAudioElement | null;
+      if (audio && !audio.paused && !audio.muted) {
         if (time >= 49.0) {
           const remainingRatio = Math.max(0, (DURATION - time) / 1.4);
           audio.volume = Math.min(1.0, Math.max(0, remainingRatio));
@@ -197,19 +192,22 @@ export const CanvasFilmJourney: React.FC = () => {
         setLoading(false);
         setMediaStatus('');
 
-        // Start film playback smoothly upon opening (audio remains silent unless tapped)
+        // Start film playback smoothly upon opening
         window.setTimeout(() => {
           if (autoPlayEnabledRef.current && !document.querySelector('dialog[open]')) {
             player.play();
           }
         }, 500);
+
+        // Directly kick off audio playback automatically
+        playMusic();
       },
       onFrame(time) {
         updateChapter(time);
       },
       onEnd() {
         // Single visual loop completed: reset song to start so it never runs into later lyrics
-        const audio = audioRef.current;
+        const audio = document.getElementById('bg-music-audio') as HTMLAudioElement | null;
         if (audio) {
           audio.pause();
           audio.currentTime = 0;
@@ -223,11 +221,13 @@ export const CanvasFilmJourney: React.FC = () => {
             window.setTimeout(() => {
               if (autoPlayEnabledRef.current && !document.querySelector('dialog[open]')) {
                 player.play();
-                // If user had tapped, restart song from the very first note
-                if (hasUserTappedAudioRef.current && audioRef.current) {
-                  audioRef.current.currentTime = 0;
-                  audioRef.current.volume = 1.0;
-                  audioRef.current.play().catch(() => {});
+                // Restart song in sync from the very first note
+                const a = document.getElementById('bg-music-audio') as HTMLAudioElement | null;
+                if (a) {
+                  a.currentTime = 0;
+                  a.muted = false;
+                  a.volume = 1.0;
+                  a.play().catch(() => {});
                 }
               }
             }, 500);
@@ -263,7 +263,7 @@ export const CanvasFilmJourney: React.FC = () => {
       clearTimeout(idleResumeTimerRef.current);
       player.dispose();
     };
-  }, [updateChapter, updateHeroDepth]);
+  }, [updateChapter, updateHeroDepth, playMusic]);
 
   // ─────────────────────────────────────────────────────────────
   // 5. TOUCH & SCROLL CONTROLLERS (WITH SEAMLESS AUTO-RESUME)
@@ -362,13 +362,12 @@ export const CanvasFilmJourney: React.FC = () => {
   const handleNextChapter = () => {
     if (activeChapter >= STARTS.length - 1) {
       playerRef.current?.seek(0);
-      const audio = audioRef.current;
+      const audio = document.getElementById('bg-music-audio') as HTMLAudioElement | null;
       if (audio) {
         audio.currentTime = 0;
+        audio.muted = false;
         audio.volume = 1.0;
-        if (hasUserTappedAudioRef.current) {
-          audio.play().catch(() => {});
-        }
+        audio.play().catch(() => {});
       }
       if (autoPlayEnabledRef.current) {
         playerRef.current?.play();
@@ -829,25 +828,6 @@ export const CanvasFilmJourney: React.FC = () => {
           </button>
         </div>
       </dialog>
-
-      {/* ── BACKGROUND MUSIC (Tap-to-play, zero eager network payload, loop-synced) ── */}
-      <audio
-        ref={audioRef}
-        src="/audio/bg-music.mp3"
-        preload="none"
-        loop={false}
-        playsInline
-        aria-hidden="true"
-        style={{
-          position: 'fixed',
-          top: -9999,
-          left: -9999,
-          width: 1,
-          height: 1,
-          opacity: 0,
-          pointerEvents: 'none',
-        }}
-      />
     </>
   );
 };

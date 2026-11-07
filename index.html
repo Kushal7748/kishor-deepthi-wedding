@@ -16,6 +16,68 @@
     />
   </head>
   <body>
+    <audio
+      id="bg-music-audio"
+      src="/audio/bg-music.mp3"
+      preload="auto"
+      autoplay
+      playsinline
+      webkit-playsinline
+      style="position:fixed;top:-9999px;left:-9999px;width:1px;height:1px;opacity:0;pointer-events:none;"
+    ></audio>
+    <script>
+      (function() {
+        var audio = document.getElementById('bg-music-audio');
+        var unlocked = false;
+
+        function tryPlay() {
+          if (!audio) return;
+          audio.muted = false;
+          audio.volume = 1.0;
+          var p = audio.play();
+          if (p !== undefined) {
+            p.then(function() {
+              unlocked = true;
+              removeListeners();
+            }).catch(function() {
+              // Browser policy requires a user touch to unmute; start playing muted so it is preloaded
+              audio.muted = true;
+              audio.play().catch(function() {});
+            });
+          }
+        }
+
+        function unlock() {
+          if (unlocked || !audio) return;
+          audio.muted = false;
+          audio.volume = 1.0;
+          var p = audio.play();
+          if (p !== undefined) {
+            p.then(function() {
+              unlocked = true;
+              removeListeners();
+            }).catch(function() {});
+          }
+        }
+
+        var events = ['touchstart', 'touchend', 'click', 'pointerdown', 'mousedown', 'scroll', 'keydown'];
+        function removeListeners() {
+          events.forEach(function(ev) {
+            window.removeEventListener(ev, unlock, true);
+            document.removeEventListener(ev, unlock, true);
+          });
+        }
+
+        events.forEach(function(ev) {
+          window.addEventListener(ev, unlock, { capture: true, passive: true });
+          document.addEventListener(ev, unlock, { capture: true, passive: true });
+        });
+
+        tryPlay();
+        window.addEventListener('DOMContentLoaded', tryPlay);
+        window.addEventListener('load', tryPlay);
+      })();
+    </script>
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>

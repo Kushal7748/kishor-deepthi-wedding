@@ -52,12 +52,12 @@ export class FrameSheets {
     this.perSheet = manifest.columns * manifest.rows;
 
     const isMobile = variant === 'mobile';
-    // Generous lookahead buffer: ~3 to 4 seconds of smooth playback ahead
-    this.prefetchAhead = isMobile ? 9 : 14;
+    // Generous lookahead buffer: ~8 to 11 seconds of smooth, uninterrupted playback ahead
+    this.prefetchAhead = isMobile ? 24 : 32;
     // Retain past sheets for instantaneous rewinding / scrubbing
-    this.historyBehind = isMobile ? 8 : 12;
-    // Bounded LRU cache size (plenty for instant scrubbing, safe for RAM)
-    this.maxCache = isMobile ? 26 : 38;
+    this.historyBehind = isMobile ? 12 : 16;
+    // Bounded LRU cache size (high capacity for smooth streaming without stalls)
+    this.maxCache = isMobile ? 64 : 96;
 
     this.onLoad = onLoad;
     this.onError = onError;
@@ -68,9 +68,9 @@ export class FrameSheets {
   }
 
   bootstrap() {
-    // Prime the first 3 sheets immediately for zero-wait playback
+    // Prime the first 8 sheets immediately for zero-wait playback
     const initialWanted: number[] = [];
-    for (let i = 0; i < Math.min(4, this.info.sheets); i++) {
+    for (let i = 0; i < Math.min(8, this.info.sheets); i++) {
       initialWanted.push(i);
     }
     this.wanted = initialWanted;
@@ -138,7 +138,7 @@ export class FrameSheets {
   }
 
   maxConcurrent(): number {
-    return this.variant === 'mobile' ? 3 : 5;
+    return this.variant === 'mobile' ? 4 : 6;
   }
 
   pump() {
