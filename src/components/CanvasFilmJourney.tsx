@@ -28,7 +28,6 @@ export const CanvasFilmJourney: React.FC = () => {
 
   const playerRef = useRef<FramePlayer | null>(null);
   const lastChapterRef = useRef<number>(-1);
-  const autoHoldUntilRef = useRef<number>(0);
   const idleResumeTimerRef = useRef<number>(0);
   const autoPlayEnabledRef = useRef<boolean>(true);
   const hasUserTappedAudioRef = useRef<boolean>(false);
@@ -112,21 +111,7 @@ export const CanvasFilmJourney: React.FC = () => {
       }
 
       setActiveChapter(idx);
-
-      // When auto-scroll crosses into Chapter 4 (The Gathering / Dates), pause briefly to read
-      if (idx !== lastChapterRef.current) {
-        lastChapterRef.current = idx;
-        if (idx === 3 && autoPlayEnabledRef.current) {
-          const holdMs = 3200;
-          autoHoldUntilRef.current = performance.now() + holdMs;
-          playerRef.current?.pause();
-          window.setTimeout(() => {
-            if (autoPlayEnabledRef.current && !document.querySelector('dialog[open]')) {
-              playerRef.current?.play();
-            }
-          }, holdMs);
-        }
-      }
+      lastChapterRef.current = idx;
 
       // Fast cached chapter opacity fade
       const copies = chapterCopiesRef.current.length > 0
