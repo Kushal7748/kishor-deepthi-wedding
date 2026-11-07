@@ -31,3 +31,5 @@ qa_screenshots_film
 qa_compare.mjs
 qa_mobile_film.mjs
 qa_screenshots.mjs
+
+.vercel

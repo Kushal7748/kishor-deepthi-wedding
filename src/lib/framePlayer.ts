@@ -1,5 +1,5 @@
 // ============================================================
-// FRAME PLAYER & SPRITE SHEET STREAMING ENGINE
+// FRAME PLAYER & SPRITE SHEET STREAMING ENGINE (HIGH PERFORMANCE)
 // ============================================================
 
 export interface ManifestVariant {
@@ -19,22 +19,21 @@ export interface FrameManifest {
   };
 }
 
-const PREFETCH_FRAMES = 24; // Stream ahead smoothly without excessive memory usage
-const WARM_SHEETS = 1;      // Instant start: preload only initial frame sheet (< 400KB)
-const WARM_CONCURRENCY = 2;
-
 export class FrameSheets {
   framesBase: string;
   manifest: FrameManifest;
   variant: 'mobile' | 'desktop';
   info: ManifestVariant;
   perSheet: number;
-  prefetchSheets: number;
+  prefetchAhead: number;
+  historyBehind: number;
+  maxCache: number;
+
   cache = new Map<number, ImageBitmap | HTMLImageElement>();
   loading = new Map<number, AbortController>();
   failures = new Map<number, number>();
   wanted: number[] = [];
-  bootstrapEnd = 0;
+  currentSheet = 0;
   onLoad: () => void;
   onError: (err: unknown) => void;
   closed = false;
@@ -51,10 +50,15 @@ export class FrameSheets {
     this.variant = variant;
     this.info = manifest.variants[variant];
     this.perSheet = manifest.columns * manifest.rows;
-    this.prefetchSheets = Math.min(
-      this.info.sheets,
-      Math.ceil(PREFETCH_FRAMES / this.perSheet)
-    );
+
+    const isMobile = variant === 'mobile';
+    // Generous lookahead buffer: ~3 to 4 seconds of smooth playback ahead
+    this.prefetchAhead = isMobile ? 9 : 14;
+    // Retain past sheets for instantaneous rewinding / scrubbing
+    this.historyBehind = isMobile ? 8 : 12;
+    // Bounded LRU cache size (plenty for instant scrubbing, safe for RAM)
+    this.maxCache = isMobile ? 26 : 38;
+
     this.onLoad = onLoad;
     this.onError = onError;
   }
@@ -64,69 +68,96 @@ export class FrameSheets {
   }
 
   bootstrap() {
-    this.bootstrapEnd = this.prefetchSheets;
+    // Prime the first 3 sheets immediately for zero-wait playback
+    const initialWanted: number[] = [];
+    for (let i = 0; i < Math.min(4, this.info.sheets); i++) {
+      initialWanted.push(i);
+    }
+    this.wanted = initialWanted;
     this.pump();
-  }
-
-  clearBootstrap(atSheet: number) {
-    if (atSheet >= this.bootstrapEnd - 1) this.bootstrapEnd = 0;
-  }
-
-  keepInCache(index: number): boolean {
-    return this.wanted.includes(index) || index < this.bootstrapEnd;
   }
 
   focus(sheet: number, direction: number = 1) {
-    const dir = direction || 1;
+    this.currentSheet = sheet;
+    const dir = direction >= 0 ? 1 : -1;
     const wanted: number[] = [];
-    const behind = sheet - dir;
-    if (behind >= 0 && behind < this.info.sheets) wanted.push(behind);
-    for (let i = 0; i <= this.prefetchSheets; i++) {
+
+    // 1. Immediate current and next sheets (highest priority)
+    wanted.push(sheet);
+    const stepAhead = dir === 1 ? this.prefetchAhead : Math.max(4, this.historyBehind);
+    const stepBehind = dir === 1 ? this.historyBehind : this.prefetchAhead;
+
+    for (let i = 1; i <= stepAhead; i++) {
       const idx = sheet + i * dir;
       if (idx >= 0 && idx < this.info.sheets) wanted.push(idx);
     }
-    if (wanted.join() === this.wanted.join()) return;
-    this.wanted = wanted;
 
-    // Prune unneeded bitmaps to preserve mobile RAM
-    for (const [index, bitmap] of this.cache) {
-      if (!this.keepInCache(index)) {
-        if ('close' in bitmap && typeof bitmap.close === 'function') {
-          bitmap.close();
-        }
-        this.cache.delete(index);
+    // 2. Buffer behind for instant scrub-back
+    for (let i = 1; i <= stepBehind; i++) {
+      const idx = sheet - i * dir;
+      if (idx >= 0 && idx < this.info.sheets && !wanted.includes(idx)) {
+        wanted.push(idx);
       }
     }
-    for (const [index, request] of this.loading) {
-      if (!this.keepInCache(index)) request.abort();
-    }
+
+    this.wanted = wanted;
+    this.pruneCache();
     this.pump();
   }
 
+  pruneCache() {
+    // Only prune if cache exceeds limit
+    if (this.cache.size <= this.maxCache) return;
+
+    // Evict sheets that are furthest from current position
+    const sortedEntries = Array.from(this.cache.keys()).sort(
+      (a, b) => Math.abs(b - this.currentSheet) - Math.abs(a - this.currentSheet)
+    );
+
+    while (this.cache.size > this.maxCache && sortedEntries.length > 0) {
+      const furthest = sortedEntries.shift();
+      if (furthest === undefined) break;
+
+      // Keep within safety window
+      if (Math.abs(furthest - this.currentSheet) <= 6) break;
+
+      const bitmap = this.cache.get(furthest);
+      if (bitmap && 'close' in bitmap && typeof bitmap.close === 'function') {
+        bitmap.close();
+      }
+      this.cache.delete(furthest);
+    }
+
+    // Only abort network requests that are completely out of range (> 16 sheets away)
+    for (const [index, controller] of this.loading) {
+      if (Math.abs(index - this.currentSheet) > 16) {
+        controller.abort();
+        this.loading.delete(index);
+      }
+    }
+  }
+
   maxConcurrent(): number {
-    return this.variant === 'mobile' ? 4 : 8;
+    return this.variant === 'mobile' ? 3 : 5;
   }
 
   pump() {
     if (this.closed) return;
-    const queue = [...new Set([...this.wanted, ...this.bootstrapIndices()])];
-    for (const index of queue) {
+
+    for (const index of this.wanted) {
       if (this.loading.size >= this.maxConcurrent()) break;
       if (
         this.cache.has(index) ||
         this.loading.has(index) ||
         (this.failures.get(index) ?? 0) >= 3
-      )
+      ) {
         continue;
+      }
+
       const controller = new AbortController();
       this.loading.set(index, controller);
       this.load(index, controller);
     }
-  }
-
-  bootstrapIndices(): number[] {
-    if (!this.bootstrapEnd) return [];
-    return Array.from({ length: this.bootstrapEnd }, (_, index) => index);
   }
 
   async load(index: number, controller: AbortController) {
@@ -134,6 +165,7 @@ export class FrameSheets {
     try {
       const response = await fetch(this.sheetUrl(index), {
         signal: controller.signal,
+        cache: 'force-cache',
       });
       if (!response.ok) throw new Error(`Frame sheet ${response.status}`);
       const blob = await response.blob();
@@ -147,7 +179,8 @@ export class FrameSheets {
         URL.revokeObjectURL(url);
         bitmap = image;
       }
-      if (this.closed || controller.signal.aborted || !this.keepInCache(index)) {
+
+      if (this.closed || controller.signal.aborted) {
         if ('close' in bitmap && typeof bitmap.close === 'function') {
           bitmap.close();
         }
@@ -183,10 +216,13 @@ export interface FramePlayerOptions {
   canvas: HTMLCanvasElement;
   framesBase?: string;
   poster?: string;
+  loop?: boolean;
   onFrame?: (time: number) => void;
   onReady?: () => void;
   onError?: (err: unknown) => void;
   onProgress?: (ratio: number, label: string) => void;
+  onPlayStateChange?: (playing: boolean) => void;
+  onEnd?: () => void;
 }
 
 export class FramePlayer {
@@ -194,10 +230,13 @@ export class FramePlayer {
   context: CanvasRenderingContext2D;
   framesBase: string;
   poster?: HTMLImageElement;
+  loop = false;
   onFrame?: (time: number) => void;
   onReady?: () => void;
   onError?: (err: unknown) => void;
   onProgress?: (ratio: number, label: string) => void;
+  onPlayStateChange?: (playing: boolean) => void;
+  onEnd?: () => void;
 
   time = 0;
   direction = 0;
@@ -212,6 +251,7 @@ export class FramePlayer {
   pendingJump: number | null = null;
   ready = false;
   closed = false;
+  playing = false;
 
   fps = 24;
   perSheet = 8;
@@ -230,25 +270,31 @@ export class FramePlayer {
     canvas,
     framesBase = '/frames',
     poster = '/poster.jpg',
+    loop = false,
     onFrame,
     onReady,
     onError,
     onProgress,
+    onPlayStateChange,
+    onEnd,
   }: FramePlayerOptions) {
     this.canvas = canvas;
     const ctx = canvas.getContext('2d', { alpha: false, willReadFrequently: false });
     if (!ctx) throw new Error('Could not get 2D context');
     this.context = ctx;
     this.framesBase = framesBase;
+    this.loop = loop;
     this.onFrame = onFrame;
     this.onReady = onReady;
     this.onError = onError;
     this.onProgress = onProgress;
+    this.onPlayStateChange = onPlayStateChange;
+    this.onEnd = onEnd;
 
     const coarse =
       matchMedia('(pointer: coarse)').matches || window.innerWidth < 768;
     this.coarse = coarse;
-    this.rate = coarse ? 0.95 : 1.05; // Majestic, slow, cinematic pace
+    this.rate = coarse ? 0.95 : 1.02;
 
     if (poster) {
       this.poster = new Image();
@@ -262,7 +308,7 @@ export class FramePlayer {
 
   async load() {
     try {
-      this.onProgress?.(0, 'Preparing your journey…');
+      this.onProgress?.(0.1, 'Preparing your journey…');
       const response = await fetch('/manifest.json');
       if (!response.ok) throw new Error('Frame manifest unavailable');
       const manifest: FrameManifest = await response.json();
@@ -276,7 +322,7 @@ export class FramePlayer {
         matchMedia('(pointer: coarse)').matches || window.innerWidth < 768;
       this.variant = isMobile ? 'mobile' : 'desktop';
       this.coarse = isMobile;
-      this.rate = isMobile ? 0.95 : 1.05;
+      this.rate = isMobile ? 0.95 : 1.02;
       this.info = manifest.variants[this.variant];
       this.end = (this.info.count - 1) / this.fps;
 
@@ -291,25 +337,27 @@ export class FramePlayer {
       this.resize();
       this.store.bootstrap();
 
-      // Instant startup: warm only the initial moment (< 100ms)
-      this.onProgress?.(0.6, 'Preparing your journey…');
-      await this.warmInitial();
+      // Instant startup: warm initial sheets for zero-wait smooth playback
+      this.onProgress?.(0.5, 'Preparing your journey…');
+      await Promise.all([this.warmSheet(0), this.warmSheet(1)]);
+      this.warmSheet(2).catch(() => {});
 
       this.ready = true;
       this.onReady?.();
       this.onProgress?.(1, '');
       this.drawFrame(0, true);
 
-      // Silently pre-buffer upcoming moments in background without blocking UI
+      // Pre-buffer upcoming moments continuously
       this.store.focus(0, 1);
     } catch (err) {
       this.fail(err);
     }
   }
 
-  async warmInitial() {
+  async warmSheet(sheetIndex: number) {
     try {
-      const response = await fetch(this.store.sheetUrl(0));
+      if (this.store.cache.has(sheetIndex)) return;
+      const response = await fetch(this.store.sheetUrl(sheetIndex));
       if (!response.ok) throw new Error(`Initial ${response.status}`);
       const blob = await response.blob();
       let bitmap: ImageBitmap | HTMLImageElement;
@@ -323,9 +371,9 @@ export class FramePlayer {
         URL.revokeObjectURL(url);
         bitmap = image;
       }
-      this.store.cache.set(0, bitmap);
+      this.store.cache.set(sheetIndex, bitmap);
     } catch (e) {
-      console.warn('Initial warm fallback:', e);
+      console.warn(`Initial warm fallback sheet ${sheetIndex}:`, e);
     }
   }
 
@@ -336,7 +384,7 @@ export class FramePlayer {
         this.time = this.pendingJump;
         this.pendingJump = null;
       }
-    } else if (this.direction) {
+    } else if (this.playing || this.direction) {
       this.wake();
     } else if (this.frame < 0) {
       this.drawFrame(0);
@@ -344,25 +392,27 @@ export class FramePlayer {
   }
 
   applyContextSettings() {
-    // Always use high-quality smoothing for best upscale quality
+    // Pure, high-performance Canvas 2D image scaling (no ctx.filter CPU overhead)
     this.context.imageSmoothingEnabled = true;
     this.context.imageSmoothingQuality = 'high';
-    // Canvas 2D filter sharpening: contrast + saturation boost compensates for
-    // perceived softness when sprite-sheet frames are upscaled to fill the viewport
-    if ('filter' in this.context) {
-      (this.context as CanvasRenderingContext2D & { filter: string }).filter =
-        'contrast(1.1) saturate(1.08) brightness(1.01)';
-    }
   }
 
   resize() {
     const rect = this.canvas.getBoundingClientRect();
-    this.width = Math.max(1, rect.width);
-    this.height = Math.max(1, rect.height);
+    const w = Math.max(1, Math.round(rect.width));
+    const h = Math.max(1, Math.round(rect.height));
+
+    // Avoid redundant canvas resets if size didn't change
+    if (w === this.width && h === this.height && this.canvas.width > 0) return;
+
+    this.width = w;
+    this.height = h;
+
     const nativeDpr = window.devicePixelRatio || 1;
-    // Use full native DPR for crisp rendering on all displays (Retina = 2x, standard = 1x)
-    // Cap at 3 to avoid excessive GPU memory on extreme DPR devices
-    const dpr = Math.min(nativeDpr, 3);
+    // Cap DPR at 1.75 on desktop / 2.0 on mobile to balance razor-sharp quality and ultra-low fill latency
+    const maxDpr = this.coarse ? 2.0 : 1.75;
+    const dpr = Math.min(nativeDpr, maxDpr);
+
     this.canvas.width = Math.round(this.width * dpr);
     this.canvas.height = Math.round(this.height * dpr);
     this.context.setTransform(1, 0, 0, 1, 0, 0);
@@ -370,6 +420,7 @@ export class FramePlayer {
     this.drawWidth = this.width;
     this.drawHeight = this.height;
     this.applyContextSettings();
+
     if (this.frame >= 0 && this.store) {
       this.drawFrame(this.frame, true);
     } else {
@@ -434,10 +485,10 @@ export class FramePlayer {
 
   seek(targetTime: number) {
     this.stop();
+    this.playing = false;
     if (!this.store) return;
     const clamped = Math.max(0, Math.min(this.end, targetTime));
     const sheet = Math.floor((clamped * this.fps) / this.perSheet);
-    this.store.clearBootstrap(sheet);
     this.pendingJump = clamped;
     const index = Math.round(clamped * this.fps);
     this.store.focus(sheet, 1);
@@ -447,14 +498,31 @@ export class FramePlayer {
     }
   }
 
-  intent(direction: number, grace = 550) {
+  play(speed = 1.0) {
     if (!this.ready || this.closed) return;
+    this.playing = true;
+    this.direction = 1;
+    this.rate = (this.coarse ? 0.95 : 1.02) * speed;
+    this.boost = 1;
+    this.lastTick = 0;
+    this.onPlayStateChange?.(true);
+    this.wake();
+  }
+
+  pause() {
+    this.playing = false;
+    this.onPlayStateChange?.(false);
+    this.stop();
+  }
+
+  intent(direction: number, grace = 450) {
+    if (!this.ready || this.closed) return;
+    this.playing = false; // User gesture takes immediate priority
     const sheet = Math.floor((this.time * this.fps) / this.perSheet);
-    this.store?.clearBootstrap(sheet);
     if (this.direction !== direction) this.lastTick = 0;
     const now = performance.now();
-    if (now - this.lastIntent < 90) {
-      this.boost = Math.min(1.25, this.boost + 0.1);
+    if (now - this.lastIntent < 100) {
+      this.boost = Math.min(1.3, this.boost + 0.08);
     } else {
       this.boost = 1;
     }
@@ -466,35 +534,63 @@ export class FramePlayer {
   }
 
   wake() {
-    if (!this.raf && this.direction && !document.hidden && !this.closed) {
+    if (!this.raf && (this.playing || this.direction) && !document.hidden && !this.closed) {
       this.raf = requestAnimationFrame((now) => this.tick(now));
     }
   }
 
   tick(now: number) {
     this.raf = 0;
-    if (!this.direction || document.hidden || now >= this.until) {
+    if (this.closed || document.hidden) {
       this.stop();
       return;
     }
-    const dt = this.lastTick ? Math.min((now - this.lastTick) / 1000, 0.06) : 0;
+
+    const isAutoPlay = this.playing;
+    const isIntent = !isAutoPlay && this.direction !== 0 && now < this.until;
+
+    if (!isAutoPlay && !isIntent) {
+      this.stop();
+      return;
+    }
+
+    const dt = this.lastTick ? Math.min((now - this.lastTick) / 1000, 0.05) : 0;
     this.lastTick = now;
+
+    const dir = isAutoPlay ? 1 : this.direction;
+    const speedMultiplier = isAutoPlay ? 1 : this.boost;
     const next = Math.max(
       0,
       Math.min(
         this.end,
-        this.time + this.direction * this.rate * this.boost * dt
+        this.time + dir * this.rate * speedMultiplier * dt
       )
     );
+
     const index = Math.round(next * this.fps);
-    this.store.focus(Math.floor(index / this.perSheet), this.direction);
+    const sheet = Math.floor(index / this.perSheet);
+    this.store.focus(sheet, dir);
+
     if (this.drawFrame(index)) {
       this.time = next;
     }
+
     const atBoundary =
-      (this.direction < 0 && next === 0) ||
-      (this.direction > 0 && next === this.end);
-    if (atBoundary && index === this.frame) {
+      (dir < 0 && next <= 0) ||
+      (dir > 0 && next >= this.end);
+
+    if (atBoundary) {
+      if (isAutoPlay) {
+        if (dir > 0 && this.loop) {
+          this.time = 0;
+          this.drawFrame(0, true);
+          this.wake();
+          return;
+        }
+        this.playing = false;
+        this.onPlayStateChange?.(false);
+        this.onEnd?.();
+      }
       this.stop();
     } else {
       this.wake();
@@ -513,13 +609,16 @@ export class FramePlayer {
   fail(error: unknown) {
     if (this.closed) return;
     this.stop();
+    this.playing = false;
     this.onError?.(error);
   }
 
   dispose() {
     this.stop();
+    this.playing = false;
     this.closed = true;
     this.store?.dispose();
   }
 }
+
 

@@ -11,17 +11,9 @@ const CHAPTER_NAMES = [
   'The horizon',
   'The promise',
 ];
-const CHAPTER_4K_IMAGES = [
-  '/images/hero-gopuram.webp',
-  '/images/temple-corridor.webp',
-  '/images/pillared-mandapa.webp',
-  '/images/stone-colonnade.webp',
-  '/images/coastal-sea.webp',
-  '/images/coastal-arch.webp',
-];
 const DURATION = 50.416667;
-const FPS = 24;
-const FRAME = 1 / FPS;
+const FRAME = 1 / 24;
+const KANMANIYE_CUE = 48.7;
 
 export const CanvasFilmJourney: React.FC = () => {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -33,11 +25,13 @@ export const CanvasFilmJourney: React.FC = () => {
   const loaderFillRef = useRef<HTMLSpanElement | null>(null);
   const detailsDialogRef = useRef<HTMLDialogElement | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const chapterCopiesRef = useRef<HTMLElement[]>([]);
 
   const playerRef = useRef<FramePlayer | null>(null);
   const lastChapterRef = useRef<number>(-1);
   const autoHoldUntilRef = useRef<number>(0);
-  const isProgrammaticScrollRef = useRef<boolean>(false);
+  const idleResumeTimerRef = useRef<number>(0);
+  const autoPlayEnabledRef = useRef<boolean>(true);
 
   const [loading, setLoading] = useState(true);
   const [loadPct, setLoadPct] = useState(0);
@@ -45,16 +39,82 @@ export const CanvasFilmJourney: React.FC = () => {
   const [activeChapter, setActiveChapter] = useState(0);
   const [mediaStatus, setMediaStatus] = useState('');
   const [isMuted, setIsMuted] = useState(false);
+  const [isAudioPlaying, setIsAudioPlaying] = useState(false);
+  const [isAutoScrolling, setIsAutoScrolling] = useState(true);
+
+  // Cache chapter copy elements on mount
+  useEffect(() => {
+    chapterCopiesRef.current = Array.from(
+      document.querySelectorAll<HTMLElement>('.chapter-copy')
+    );
+  }, []);
 
   // ─────────────────────────────────────────────────────────────
-  // 1. HERO DEPTH MOTION (subtle parallax — no clip-path)
+  // 1. AUDIO AUTOPLAY (Starts directly upon opening, unmuted on first gesture if restricted)
+  // ─────────────────────────────────────────────────────────────
+  const startAudioPlayback = useCallback(() => {
+    const audio = audioRef.current;
+    if (!audio) return;
+
+    if (audio.currentTime < 40 && audio.readyState >= 1) {
+      try {
+        audio.currentTime = KANMANIYE_CUE;
+      } catch {
+        // seek on loaded
+      }
+    }
+    audio.muted = false;
+    audio.volume = 0.7;
+
+    const playPromise = audio.play();
+    if (playPromise !== undefined) {
+      playPromise
+        .then(() => {
+          setIsAudioPlaying(true);
+          setIsMuted(false);
+        })
+        .catch(() => {
+          // Browser autoplay restriction: will be unlocked on the very first touch/scroll
+        });
+    }
+  }, []);
+
+  useEffect(() => {
+    // Attempt instant autoplay directly as soon as the site opens
+    startAudioPlayback();
+
+    // Universal gesture unlocker: starts unmuted sound the moment user touches anywhere on mobile
+    const unlockAudio = () => {
+      startAudioPlayback();
+      const events = ['touchstart', 'touchend', 'click', 'pointerdown', 'scroll', 'keydown'];
+      events.forEach((ev) => {
+        window.removeEventListener(ev, unlockAudio, true);
+        document.removeEventListener(ev, unlockAudio, true);
+      });
+    };
+
+    const events = ['touchstart', 'touchend', 'click', 'pointerdown', 'scroll', 'keydown'];
+    events.forEach((ev) => {
+      window.addEventListener(ev, unlockAudio, { capture: true, passive: true });
+      document.addEventListener(ev, unlockAudio, { capture: true, passive: true });
+    });
+
+    return () => {
+      events.forEach((ev) => {
+        window.removeEventListener(ev, unlockAudio, true);
+        document.removeEventListener(ev, unlockAudio, true);
+      });
+    };
+  }, [startAudioPlayback]);
+
+  // ─────────────────────────────────────────────────────────────
+  // 2. HERO DEPTH MOTION (subtle parallax)
   // ─────────────────────────────────────────────────────────────
   const updateHeroDepth = useCallback((time: number) => {
     const heroContent = heroContentRef.current;
     if (!heroContent) return;
     if (time >= STARTS[1]) return;
 
-    // Subtle scale + lift as user scrolls into the film — no clip-path, no artifacts
     const depth = Math.min(Math.max(time / 5, 0), 1);
     heroContent.style.transform = `translateY(${-depth * 18}px) scale(${
       1 - depth * 0.06
@@ -62,7 +122,7 @@ export const CanvasFilmJourney: React.FC = () => {
   }, []);
 
   // ─────────────────────────────────────────────────────────────
-  // 2. CHAPTER VISIBILITY & OPACITY TRANSITIONS
+  // 3. CHAPTER VISIBILITY & OPACITY TRANSITIONS
   // ─────────────────────────────────────────────────────────────
   const updateChapter = useCallback(
     (time: number) => {
@@ -76,18 +136,27 @@ export const CanvasFilmJourney: React.FC = () => {
 
       setActiveChapter(idx);
 
-      // When auto-scroll crosses into a new chapter, hold at details chapter only
+      // When auto-scroll crosses into Chapter 4 (The Gathering / Dates), pause briefly to read
       if (idx !== lastChapterRef.current) {
         lastChapterRef.current = idx;
-        // Only pause on chapter 4 (The Gathering, idx=3) where event details are shown
-        // All other chapters: 0ms hold — continuous cinematic scroll
-        const holdMs = idx === 3 ? 2000 : 0;
-        autoHoldUntilRef.current = performance.now() + holdMs;
-        if (holdMs > 0) playerRef.current?.stop();
+        if (idx === 3 && autoPlayEnabledRef.current) {
+          const holdMs = 3200;
+          autoHoldUntilRef.current = performance.now() + holdMs;
+          playerRef.current?.pause();
+          window.setTimeout(() => {
+            if (autoPlayEnabledRef.current && !document.querySelector('dialog[open]')) {
+              playerRef.current?.play();
+              setIsAutoScrolling(true);
+            }
+          }, holdMs);
+        }
       }
 
-      // Chapter opacity smooth fade
-      const copies = document.querySelectorAll<HTMLElement>('.chapter-copy');
+      // Fast cached chapter opacity fade
+      const copies = chapterCopiesRef.current.length > 0
+        ? chapterCopiesRef.current
+        : Array.from(document.querySelectorAll<HTMLElement>('.chapter-copy'));
+
       copies.forEach((copy, i) => {
         const start = STARTS[i];
         const nextStart = STARTS[i + 1] ?? DURATION;
@@ -125,14 +194,14 @@ export const CanvasFilmJourney: React.FC = () => {
         progressFillRef.current.style.transform = `scaleX(${progress})`;
       }
 
-      // Update 3D skyline mask
+      // Update hero subtle depth motion
       updateHeroDepth(time);
     },
     [updateHeroDepth]
   );
 
   // ─────────────────────────────────────────────────────────────
-  // 3. INITIALIZE FRAME PLAYER
+  // 4. INITIALIZE FRAME PLAYER & PLAYBACK
   // ─────────────────────────────────────────────────────────────
   useEffect(() => {
     updateHeroDepth(0);
@@ -155,46 +224,38 @@ export const CanvasFilmJourney: React.FC = () => {
       onReady() {
         setLoading(false);
         setMediaStatus('');
-        // Start background music right from the iconic "Kanmaniyee..." cue (48.7s)
-        const KANMANIYE_CUE = 48.7;
-        const audio = audioRef.current;
-        if (audio) {
-          audio.currentTime = KANMANIYE_CUE;
-          audio.volume = 0.6;
-          audio.play().catch(() => {
-            // Autoplay blocked — music will start on first user interaction
-            const startOnInteract = () => {
-              if (audio.currentTime < 40) {
-                audio.currentTime = KANMANIYE_CUE;
-              }
-              audio.play().catch(() => {});
-              window.removeEventListener('wheel', startOnInteract);
-              window.removeEventListener('touchstart', startOnInteract);
-              window.removeEventListener('keydown', startOnInteract);
-              window.removeEventListener('mousedown', startOnInteract);
-            };
-            window.addEventListener('wheel', startOnInteract, { once: true, passive: true });
-            window.addEventListener('touchstart', startOnInteract, { once: true, passive: true });
-            window.addEventListener('keydown', startOnInteract, { once: true, passive: true });
-            window.addEventListener('mousedown', startOnInteract, { once: true, passive: true });
-          });
-        }
+
+        // Start film playback smoothly directly upon opening
+        window.setTimeout(() => {
+          if (autoPlayEnabledRef.current && !document.querySelector('dialog[open]')) {
+            player.play();
+            setIsAutoScrolling(true);
+          }
+        }, 800);
+
+        // Directly kick off audio playback
+        startAudioPlayback();
       },
       onFrame(time) {
         updateChapter(time);
-        // Synchronize scrollbar position with the smoothly ticking film
-        const journey = journeyRef.current;
-        if (journey) {
-          const scrollDistance = Math.max(1, journey.offsetHeight - window.innerHeight);
-          const expectedScrollY = Math.round((time / (DURATION - FRAME)) * scrollDistance);
-          if (Math.abs(window.scrollY - expectedScrollY) > 28) {
-            isProgrammaticScrollRef.current = true;
-            window.scrollTo({ top: expectedScrollY, behavior: 'instant' });
-            requestAnimationFrame(() => {
-              isProgrammaticScrollRef.current = false;
-            });
+      },
+      onPlayStateChange(playing) {
+        setIsAutoScrolling(playing);
+      },
+      onEnd() {
+        // At the end of the film journey, hold for 3.5 seconds on the final promise
+        // and then smoothly loop back to Chapter 1 (The Beginning)
+        window.setTimeout(() => {
+          if (autoPlayEnabledRef.current && !document.querySelector('dialog[open]')) {
+            player.seek(0);
+            window.setTimeout(() => {
+              if (autoPlayEnabledRef.current && !document.querySelector('dialog[open]')) {
+                player.play();
+                setIsAutoScrolling(true);
+              }
+            }, 600);
           }
-        }
+        }, 3500);
       },
       onError(err) {
         console.warn('Player issue:', err);
@@ -205,33 +266,53 @@ export const CanvasFilmJourney: React.FC = () => {
     playerRef.current = player;
     player.load();
 
+    // Debounced resize for mobile orientation and screen size changes
+    let lastW = window.innerWidth;
+    let lastH = window.innerHeight;
     const handleResize = () => {
-      player.resize();
-      updateHeroDepth(player.time);
+      const nw = window.innerWidth;
+      const nh = window.innerHeight;
+      if (Math.abs(nw - lastW) > 15 || Math.abs(nh - lastH) > 35) {
+        lastW = nw;
+        lastH = nh;
+        player.resize();
+        updateHeroDepth(player.time);
+      }
     };
     window.addEventListener('resize', handleResize);
 
     return () => {
       window.removeEventListener('resize', handleResize);
+      clearTimeout(idleResumeTimerRef.current);
       player.dispose();
     };
-  }, [updateChapter, updateHeroDepth]);
+  }, [updateChapter, updateHeroDepth, startAudioPlayback]);
 
   // ─────────────────────────────────────────────────────────────
-  // 4. MOMENTUM INTENT & SCROLL CONTROLLERS (BUTTER-SMOOTH)
+  // 5. TOUCH & SCROLL CONTROLLERS (WITH SEAMLESS AUTO-RESUME)
   // ─────────────────────────────────────────────────────────────
   useEffect(() => {
-    const journey = journeyRef.current;
     const stage = stageRef.current;
-    if (!journey) return;
 
-    // Wheel & Trackpad: drives smooth intent without jitter
+    const scheduleAutoResume = (delay = 1400) => {
+      if (!autoPlayEnabledRef.current) return;
+      clearTimeout(idleResumeTimerRef.current);
+      idleResumeTimerRef.current = window.setTimeout(() => {
+        if (autoPlayEnabledRef.current && !document.querySelector('dialog[open]')) {
+          playerRef.current?.play();
+          setIsAutoScrolling(true);
+        }
+      }, delay);
+    };
+
+    // Wheel & Trackpad
     const onWheel = (e: WheelEvent) => {
       if (document.querySelector('dialog[open]')) return;
       if (Math.abs(e.deltaX) > Math.abs(e.deltaY) || Math.abs(e.deltaY) < 1) return;
       e.preventDefault();
       const dir = Math.sign(e.deltaY);
-      playerRef.current?.intent(dir, 550);
+      playerRef.current?.intent(dir, 500);
+      scheduleAutoResume();
     };
     window.addEventListener('wheel', onWheel, { passive: false });
 
@@ -243,6 +324,7 @@ export const CanvasFilmJourney: React.FC = () => {
       if (e.touches.length === 1) {
         touchStartY = e.touches[0].clientY;
         touchStartX = e.touches[0].clientX;
+        playerRef.current?.pause();
       }
     };
 
@@ -257,132 +339,46 @@ export const CanvasFilmJourney: React.FC = () => {
       if (Math.abs(dy) >= Math.abs(dx) && Math.abs(dy) >= 2) {
         if (e.cancelable) e.preventDefault();
         const dir = Math.sign(dy);
-        playerRef.current.intent(dir, 750);
+        playerRef.current.intent(dir, 600);
         touchStartY = currentY;
         touchStartX = currentX;
       }
     };
 
+    const onTouchEnd = () => {
+      scheduleAutoResume(1200);
+    };
+
     if (stage) {
       stage.addEventListener('touchstart', onTouchStart, { passive: true });
       stage.addEventListener('touchmove', onTouchMove, { passive: false });
+      stage.addEventListener('touchend', onTouchEnd, { passive: true });
+      stage.addEventListener('touchcancel', onTouchEnd, { passive: true });
     }
-
-    // Scrollbar manual drag fallback (only when user actively drags scrollbar)
-    const onScroll = () => {
-      if (!playerRef.current?.ready || isProgrammaticScrollRef.current) return;
-      const scrollDistance = Math.max(1, journey.offsetHeight - window.innerHeight);
-      const expectedScrollY = Math.round((playerRef.current.time / (DURATION - FRAME)) * scrollDistance);
-      // Only seek if user manually dragged the scrollbar thumb far (> 160px)
-      if (Math.abs(window.scrollY - expectedScrollY) > 160) {
-        const ratio = Math.min(Math.max(window.scrollY / scrollDistance, 0), 1);
-        playerRef.current.seek(ratio * (DURATION - FRAME));
-      }
-    };
-    window.addEventListener('scroll', onScroll, { passive: true });
 
     // Keyboard navigation
     const onKeyDown = (e: KeyboardEvent) => {
       if (['ArrowDown', 'PageDown', ' '].includes(e.key)) {
         e.preventDefault();
-        playerRef.current?.intent(1, 600);
+        playerRef.current?.intent(1, 550);
+        scheduleAutoResume();
       } else if (['ArrowUp', 'PageUp'].includes(e.key)) {
         e.preventDefault();
-        playerRef.current?.intent(-1, 600);
+        playerRef.current?.intent(-1, 550);
+        scheduleAutoResume();
       }
     };
     window.addEventListener('keydown', onKeyDown);
 
     return () => {
       window.removeEventListener('wheel', onWheel);
-      window.removeEventListener('scroll', onScroll);
       window.removeEventListener('keydown', onKeyDown);
       if (stage) {
         stage.removeEventListener('touchstart', onTouchStart);
         stage.removeEventListener('touchmove', onTouchMove);
+        stage.removeEventListener('touchend', onTouchEnd);
+        stage.removeEventListener('touchcancel', onTouchEnd);
       }
-    };
-  }, []);
-
-  // ─────────────────────────────────────────────────────────────
-  // 5. AUTO-SCROLL ENGINE — cinematic playback, pauses on user interaction
-  // ─────────────────────────────────────────────────────────────
-  useEffect(() => {
-    // Controlled forward drive per tick — tight grace prevents runaway inertia / overshoot
-    const AUTO_GRACE = 400; // ms of continuous intent per rAF tick
-
-    let autoRaf = 0;
-    let userIdleTimer = 0;
-    let isPaused = false;
-    let isRunning = false;
-
-    const resume = () => {
-      isPaused = false;
-    };
-
-    const pauseForUser = () => {
-      isPaused = true;
-      clearTimeout(userIdleTimer);
-      // Resume auto-scroll 6 s after the last user interaction
-      userIdleTimer = window.setTimeout(resume, 6000);
-    };
-
-    const tick = () => {
-      autoRaf = 0;
-      const player = playerRef.current;
-      if (!player?.ready || document.hidden || !isRunning) {
-        scheduleNext();
-        return;
-      }
-      if (isPaused) {
-        scheduleNext();
-        return;
-      }
-      const now = performance.now();
-      // Hold at chapter transitions (set by updateChapter)
-      if (now < autoHoldUntilRef.current) {
-        scheduleNext();
-        return;
-      }
-      // Drive the film forward — stop at the very last frame
-      if (player.time < DURATION - FRAME * 2) {
-        player.intent(1, AUTO_GRACE);
-      }
-      scheduleNext();
-    };
-
-    const scheduleNext = () => {
-      if (isRunning) autoRaf = requestAnimationFrame(tick);
-    };
-
-    // Any user interaction pauses auto-scroll for 6 s
-    const onInteract = () => pauseForUser();
-    window.addEventListener('wheel', onInteract, { passive: true });
-    window.addEventListener('touchstart', onInteract, { passive: true });
-    window.addEventListener('keydown', onInteract, { passive: true });
-    window.addEventListener('mousedown', onInteract, { passive: true });
-
-    // Start once player is ready — poll until loaded
-    const startWhenReady = () => {
-      if (playerRef.current?.ready) {
-        isRunning = true;
-        // Brief initial hold so the opening title renders before scrolling
-        autoHoldUntilRef.current = performance.now() + 2000;
-        scheduleNext();
-      } else {
-        setTimeout(startWhenReady, 400);
-      }
-    };
-    startWhenReady();
-
-    return () => {
-      isRunning = false;
-      if (autoRaf) cancelAnimationFrame(autoRaf);
-      clearTimeout(userIdleTimer);
-      window.removeEventListener('wheel', onInteract);
-      window.removeEventListener('touchstart', onInteract);
-      window.removeEventListener('keydown', onInteract);
-      window.removeEventListener('mousedown', onInteract);
     };
   }, []);
 
@@ -390,29 +386,79 @@ export const CanvasFilmJourney: React.FC = () => {
   const handleNextChapter = () => {
     if (activeChapter >= STARTS.length - 1) {
       playerRef.current?.seek(0);
+      if (autoPlayEnabledRef.current) {
+        playerRef.current?.play();
+      }
     } else {
       const nextTime = STARTS[activeChapter + 1];
       playerRef.current?.seek(nextTime);
+      if (autoPlayEnabledRef.current) {
+        window.setTimeout(() => {
+          playerRef.current?.play();
+        }, 300);
+      }
     }
   };
 
   const handleJumpToChapter = (chapterIdx: number) => {
     const targetTime = STARTS[chapterIdx];
     playerRef.current?.seek(targetTime);
+    if (autoPlayEnabledRef.current) {
+      window.setTimeout(() => {
+        playerRef.current?.play();
+      }, 300);
+    }
   };
 
-  // Music mute toggle
-  const toggleMute = () => {
+  // Auto-scroll toggle
+  const toggleAutoScroll = () => {
+    const player = playerRef.current;
+    if (!player) return;
+    if (isAutoScrolling) {
+      player.pause();
+      autoPlayEnabledRef.current = false;
+      setIsAutoScrolling(false);
+      clearTimeout(idleResumeTimerRef.current);
+    } else {
+      autoPlayEnabledRef.current = true;
+      setIsAutoScrolling(true);
+      player.play();
+    }
+  };
+
+  // Music mute/play toggle
+  const toggleMusic = () => {
     const audio = audioRef.current;
     if (!audio) return;
-    audio.muted = !audio.muted;
-    setIsMuted(audio.muted);
+
+    if (audio.paused) {
+      if (audio.currentTime < 40 && audio.readyState >= 1) {
+        try {
+          audio.currentTime = KANMANIYE_CUE;
+        } catch {
+          // ignore
+        }
+      }
+      audio.muted = false;
+      audio.play().then(() => {
+        setIsAudioPlaying(true);
+        setIsMuted(false);
+      }).catch(() => {});
+    } else {
+      if (audio.muted) {
+        audio.muted = false;
+        setIsMuted(false);
+      } else {
+        audio.muted = true;
+        setIsMuted(true);
+      }
+    }
   };
 
   // Open/Close Dialogs
   const openCelebrations = (e: React.MouseEvent) => {
     e.preventDefault();
-    playerRef.current?.stop();
+    playerRef.current?.pause();
     detailsDialogRef.current?.showModal();
     document.body.style.overflow = 'hidden';
   };
@@ -420,12 +466,13 @@ export const CanvasFilmJourney: React.FC = () => {
   const closeCelebrations = () => {
     detailsDialogRef.current?.close();
     document.body.style.overflow = '';
+    if (autoPlayEnabledRef.current) {
+      playerRef.current?.play();
+      setIsAutoScrolling(true);
+    }
   };
 
-
-  // ─────────────────────────────────────────────────────────────
-  // 5. ICS CALENDAR DOWNLOAD
-  // ─────────────────────────────────────────────────────────────
+  // ICS Calendar Download
   const downloadIcs = (e: React.MouseEvent) => {
     e.preventDefault();
     const icsContent = [
@@ -493,37 +540,41 @@ export const CanvasFilmJourney: React.FC = () => {
           aria-label="A journey to our beginning"
         >
           <div ref={stageRef} className="journey-stage">
-            {/* ── HEADER ────────────────────────────────────────── */}
+            {/* ── HEADER (Optimized for Mobile Phone Touch & Layout) ── */}
             <header className="site-header">
               <a
-                className="header-link"
+                className="header-link header-badge"
                 href="#celebrations"
                 onClick={openCelebrations}
+                aria-label="Open wedding celebrations and invitation details"
               >
-                The celebrations <span aria-hidden="true">↗</span>
+                Wedding Details <span aria-hidden="true">↗</span>
               </a>
-              <button
-                type="button"
-                className="music-toggle"
-                aria-label={isMuted ? 'Unmute music' : 'Mute music'}
-                onClick={toggleMute}
-              >
-                {isMuted ? '♪ off' : '♪ on'}
-              </button>
-            </header>
 
-            {/* ── 4K ULTRA-HD CINEMATIC BACKDROPS (CRYSTAL CLEAR & CRISP) ── */}
-            <div className="backdrop-4k-container" aria-hidden="true">
-              {CHAPTER_4K_IMAGES.map((src, i) => (
-                <div
-                  key={i}
-                  className={`backdrop-4k-slide ${
-                    activeChapter === i ? 'is-active' : ''
-                  }`}
-                  style={{ backgroundImage: `url(${src})` }}
-                />
-              ))}
-            </div>
+              <div className="header-controls">
+                <button
+                  type="button"
+                  className={`ctrl-badge autoscroll-toggle ${isAutoScrolling ? 'is-active' : ''}`}
+                  aria-label={isAutoScrolling ? 'Pause auto-scrolling' : 'Resume auto-scrolling'}
+                  onClick={toggleAutoScroll}
+                  title="Toggle auto-scrolling"
+                >
+                  <span className={`ctrl-dot ${isAutoScrolling ? 'pulsing' : ''}`} />
+                  <span>{isAutoScrolling ? 'Auto-scroll ON' : 'Paused'}</span>
+                </button>
+
+                <button
+                  type="button"
+                  className={`ctrl-badge music-toggle ${isAudioPlaying && !isMuted ? 'is-active' : 'is-muted'}`}
+                  aria-label={isAudioPlaying && !isMuted ? 'Mute background song' : 'Play background song'}
+                  onClick={toggleMusic}
+                  title={isAudioPlaying && !isMuted ? 'Song playing (Tap to mute)' : 'Song muted (Tap to play)'}
+                >
+                  <span className="ctrl-icon">{isAudioPlaying && !isMuted ? '🔊' : '🔇'}</span>
+                  <span>{isAudioPlaying && !isMuted ? 'Music ON' : 'Music OFF'}</span>
+                </button>
+              </div>
+            </header>
 
             {/* ── CINEMATIC FILM CANVAS ─────────────────────────── */}
             <div className="film-region">
@@ -537,7 +588,7 @@ export const CanvasFilmJourney: React.FC = () => {
               </div>
             </div>
 
-            {/* ── CHAPTER COPY OVERLAYS ─────────────────────────── */}
+            {/* ── CHAPTER COPY OVERLAYS (Pixel-Perfect Phone Sizing) ── */}
             <div className="copy-region" id="copy-region">
               {/* 01 THE BEGINNING */}
               <article
@@ -551,13 +602,13 @@ export const CanvasFilmJourney: React.FC = () => {
                 <div ref={heroContentRef} className="hero-content">
                   <p className="eyebrow">{config.hero.supertitle}</p>
                   <h1>
-                    <span>{config.groom.firstName}</span> <em>&</em>{' '}
-                    <span>{config.bride.firstName}</span>
+                    <span className="name-groom">{config.groom.firstName}</span>{' '}
+                    <em className="name-amp">&amp;</em>{' '}
+                    <span className="name-bride">{config.bride.firstName}</span>
                   </h1>
-                  {/* Subtitle removed per user request (2nd pic) */}
                   <p className="hero-date">
-                    {config.hero.dateRange}
-                    {config.hero.location && <span>{config.hero.location}</span>}
+                    <span className="hero-dates-text">{config.hero.dateRange}</span>
+                    {config.hero.location && <span className="hero-venue-text">{config.hero.location}</span>}
                   </p>
                 </div>
               </article>
@@ -571,17 +622,19 @@ export const CanvasFilmJourney: React.FC = () => {
                 data-name="The blessing"
                 aria-hidden={activeChapter !== 1}
               >
-                <p className="eyebrow">{config.sections.blessing.supertitle}</p>
-                <h2>
-                  {config.sections.blessing.headline1}
-                  <br />
-                  <em>{config.sections.blessing.headline2}</em>
-                </h2>
-                <p className="copy-note">
-                  {config.sections.blessing.body1}
-                  <br />
-                  {config.sections.blessing.body2}
-                </p>
+                <div className="chapter-inner">
+                  <p className="eyebrow">{config.sections.blessing.supertitle}</p>
+                  <h2>
+                    {config.sections.blessing.headline1}
+                    <br />
+                    <em>{config.sections.blessing.headline2}</em>
+                  </h2>
+                  <p className="copy-note">
+                    {config.sections.blessing.body1}
+                    <br />
+                    {config.sections.blessing.body2}
+                  </p>
+                </div>
               </article>
 
               {/* 03 THE LIGHT */}
@@ -593,38 +646,43 @@ export const CanvasFilmJourney: React.FC = () => {
                 data-name="The light"
                 aria-hidden={activeChapter !== 2}
               >
-                <p className="eyebrow">{config.sections.light.supertitle}</p>
-                <h2>
-                  {config.sections.light.headline1}
-                  <br />
-                  <em>{config.sections.light.headline2}</em>
-                </h2>
-                {/* Body caption removed per user request (3rd pic) */}
+                <div className="chapter-inner">
+                  <p className="eyebrow">{config.sections.light.supertitle}</p>
+                  <h2>
+                    {config.sections.light.headline1}
+                    <br />
+                    <em>{config.sections.light.headline2}</em>
+                  </h2>
+                </div>
               </article>
 
-              {/* 04 THE GATHERING */}
+              {/* 04 THE GATHERING (The Celebrations / Events) */}
               <article
-                className={`chapter-copy ${
+                className={`chapter-copy chapter-events ${
                   activeChapter === 3 ? 'is-active' : ''
                 }`}
                 data-start="26.5"
                 data-name="The gathering"
                 aria-hidden={activeChapter !== 3}
               >
-                <p className="eyebrow">
-                  {config.sections.gathering.supertitle}
-                </p>
-                <h2>
-                  {config.sections.gathering.headline1}
-                  <br />
-                  <em>{config.sections.gathering.headline2}</em>
-                </h2>
-                <div className="film-events">
-                  {config.sections.gathering.events.map((ev, i) => (
-                    <p key={i}>
-                      <span>{ev.date} · {ev.time}</span> {ev.name}
-                    </p>
-                  ))}
+                <div className="chapter-inner">
+                  <p className="eyebrow">
+                    {config.sections.gathering.supertitle}
+                  </p>
+                  <h2>
+                    {config.sections.gathering.headline1}
+                    <br />
+                    <em>{config.sections.gathering.headline2}</em>
+                  </h2>
+                  <div className="film-events-cards">
+                    {config.sections.gathering.events.map((ev, i) => (
+                      <div className="event-glass-card" key={i}>
+                        <div className="event-badge-tag">{ev.name}</div>
+                        <div className="event-time-row">{ev.fullDate}</div>
+                        <div className="event-note-row">{ev.note}</div>
+                      </div>
+                    ))}
+                  </div>
                 </div>
               </article>
 
@@ -637,46 +695,60 @@ export const CanvasFilmJourney: React.FC = () => {
                 data-name="The horizon"
                 aria-hidden={activeChapter !== 4}
               >
-                <p className="eyebrow">{config.sections.horizon.supertitle}</p>
-                <h2>
-                  {config.sections.horizon.headline1}
-                  <br />
-                  <em>{config.sections.horizon.headline2}</em>
-                </h2>
-                <p className="copy-note">
-                  {config.sections.horizon.body1}
-                  <br />
-                  {config.sections.horizon.body2}
-                </p>
+                <div className="chapter-inner">
+                  <p className="eyebrow">{config.sections.horizon.supertitle}</p>
+                  <h2>
+                    {config.sections.horizon.headline1}
+                    <br />
+                    <em>{config.sections.horizon.headline2}</em>
+                  </h2>
+                  <p className="copy-note">
+                    {config.sections.horizon.body1}
+                    <br />
+                    {config.sections.horizon.body2}
+                  </p>
+                </div>
               </article>
 
-              {/* 06 THE PROMISE */}
+              {/* 06 THE PROMISE & INVITATION CALL TO ACTION */}
               <article
-                className={`chapter-copy ${
+                className={`chapter-copy chapter-final ${
                   activeChapter === 5 ? 'is-active' : ''
                 }`}
                 data-start="44"
                 data-name="The promise"
                 aria-hidden={activeChapter !== 5}
               >
-                <p className="eyebrow">{config.sections.promise.supertitle}</p>
-                <h2>
-                  {config.sections.promise.headline1}
-                  <br />
-                  <em>{config.sections.promise.headline2}</em>
-                </h2>
-                <p className="copy-note">
-                  {config.sections.promise.body1}
-                  <br />
-                  {config.sections.promise.body2}
-                </p>
-                <a
-                  href="#celebrations"
-                  className="text-link"
-                  onClick={openCelebrations}
-                >
-                  The wedding details <span aria-hidden="true">↓</span>
-                </a>
+                <div className="chapter-inner">
+                  <p className="eyebrow">{config.sections.promise.supertitle}</p>
+                  <h2>
+                    {config.sections.promise.headline1}
+                    <br />
+                    <em>{config.sections.promise.headline2}</em>
+                  </h2>
+                  <p className="copy-note">
+                    {config.sections.promise.body1}
+                    <br />
+                    {config.sections.promise.body2}
+                  </p>
+
+                  <div className="final-actions-group">
+                    <button
+                      type="button"
+                      className="cta-gold-btn"
+                      onClick={openCelebrations}
+                    >
+                      View Wedding Details ↗
+                    </button>
+                    <button
+                      type="button"
+                      className="cta-subtle-btn"
+                      onClick={downloadIcs}
+                    >
+                      Save the Dates 📅
+                    </button>
+                  </div>
+                </div>
               </article>
             </div>
 
@@ -697,14 +769,16 @@ export const CanvasFilmJourney: React.FC = () => {
               ))}
             </nav>
 
-            {/* ── STICKY FOOTER ─────────────────────────────────── */}
+            {/* ── STICKY FOOTER (Clean Mobile Layout) ───────────── */}
             <footer className="journey-footer">
               <span className="chapter-caption">
                 <b id="chapter-number">
                   {String(activeChapter + 1).padStart(2, '0')}
                 </b>
+                <span className="chapter-caption-sep">/ 06</span>
                 <span id="chapter-name">{CHAPTER_NAMES[activeChapter]}</span>
               </span>
+
               <span
                 className="media-status"
                 id="media-status"
@@ -712,17 +786,21 @@ export const CanvasFilmJourney: React.FC = () => {
               >
                 {mediaStatus}
               </span>
+
               <button
                 className="scroll-cue"
                 id="next-chapter"
                 type="button"
                 onClick={handleNextChapter}
+                aria-label={activeChapter === 5 ? 'Replay journey from start' : 'Skip to next chapter'}
               >
-                {activeChapter === 5
-                  ? 'Back to the beginning '
-                  : 'Scroll to unfold '}
-                <span aria-hidden="true">
-                  {activeChapter === 5 ? '↑' : '↓'}
+                <span className="cue-text">
+                  {activeChapter === 5
+                    ? 'Replay journey '
+                    : 'Next chapter '}
+                </span>
+                <span className="cue-arrow" aria-hidden="true">
+                  {activeChapter === 5 ? '↺' : '→'}
                 </span>
               </button>
             </footer>
@@ -741,6 +819,8 @@ export const CanvasFilmJourney: React.FC = () => {
         id="wedding-details"
         aria-labelledby="details-title"
       >
+        <div className="drawer-handle" aria-hidden="true" />
+
         <button
           type="button"
           className="dialog-close"
@@ -751,32 +831,34 @@ export const CanvasFilmJourney: React.FC = () => {
           ×
         </button>
 
-        <div className="card-invocations" style={{ textAlign: 'center', marginBottom: '14px', color: 'var(--gold)', fontSize: '11px', letterSpacing: '0.08em' }}>
-          <p>|| Sri Lakshmivenkateshwara Swamy Prasanna || &nbsp; || Sri Muthuraya Swamy Prasanna ||</p>
+        <div className="card-invocations">
+          <p>|| Sri Lakshmivenkateshwara Swamy Prasanna ||</p>
+          <p>|| Sri Muthuraya Swamy Prasanna ||</p>
         </div>
 
-        <p className="small-label" style={{ textAlign: 'center', letterSpacing: '0.15em' }}>
+        <p className="card-solicit-label">
           SOLICIT YOUR GRACIOUS PRESENCE ON THE WEDDING OF
         </p>
 
-        <h2 id="details-title" style={{ textAlign: 'center', margin: '8px 0 16px' }}>
-          {config.groom.fullName}
+        <h2 id="details-title" className="dialog-couple-names">
+          <span className="dialog-name-groom">{config.groom.fullName}</span>
           <br />
-          <em style={{ fontSize: '0.75em', color: 'var(--gold)' }}>&amp;</em>
+          <em className="dialog-amp">&amp;</em>
           <br />
-          {config.bride.fullName}
+          <span className="dialog-name-bride">{config.bride.fullName}</span>
         </h2>
 
-        <div className="family-section" style={{ borderTop: '1px solid var(--line)', borderBottom: '1px solid var(--line)', padding: '16px 0', margin: '16px 0', fontSize: '12px', lineHeight: '1.7', color: '#554e44' }}>
-          <div style={{ marginBottom: '12px' }}>
-            <strong style={{ color: 'var(--ink)', display: 'block', fontSize: '11px', textTransform: 'uppercase', letterSpacing: '0.08em' }}>Son of:</strong>
-            <p>{config.parents.groom.names} {config.parents.groom.lineage}</p>
-            <p style={{ color: '#776e62' }}>{config.parents.groom.address}</p>
+        <div className="family-section">
+          <div className="family-col">
+            <strong className="family-title">Son of:</strong>
+            <p className="family-names">{config.parents.groom.names}</p>
+            <p className="family-lineage">{config.parents.groom.lineage}</p>
+            <p className="family-addr">{config.parents.groom.address}</p>
           </div>
-          <div>
-            <strong style={{ color: 'var(--ink)', display: 'block', fontSize: '11px', textTransform: 'uppercase', letterSpacing: '0.08em' }}>Daughter of:</strong>
-            <p>{config.parents.bride.names}</p>
-            <p style={{ color: '#776e62' }}>{config.parents.bride.address}</p>
+          <div className="family-col">
+            <strong className="family-title">Daughter of:</strong>
+            <p className="family-names">{config.parents.bride.names}</p>
+            <p className="family-addr">{config.parents.bride.address}</p>
           </div>
         </div>
 
@@ -791,7 +873,7 @@ export const CanvasFilmJourney: React.FC = () => {
                   {ev.fullDate}
                 </p>
                 <h3>{ev.name}</h3>
-                <p style={{ fontWeight: 500, color: 'var(--ink)' }}>{ev.note}</p>
+                <p className="event-note-highlight">{ev.note}</p>
                 <p>{ev.description}</p>
               </div>
               <div className="event-details">
@@ -801,46 +883,71 @@ export const CanvasFilmJourney: React.FC = () => {
           ))}
         </div>
 
-        <div className="venue-card" style={{ background: '#f5f0e8', border: '1px solid #d4cdc0', borderRadius: '8px', padding: '16px 20px', margin: '20px 0' }}>
-          <p className="small-label" style={{ color: '#886d42', marginBottom: '4px' }}>WEDDING VENUE</p>
-          <h4 style={{ margin: '0 0 6px', fontSize: '18px', color: 'var(--ink)' }}>{config.venue.name}</h4>
-          <p style={{ margin: '0', fontSize: '13px', color: '#665f53', lineHeight: '1.5' }}>
+        <div className="venue-card">
+          <p className="venue-label">WEDDING VENUE</p>
+          <h4 className="venue-title">{config.venue.name}</h4>
+          <p className="venue-address">
             {config.venue.landmark}, {config.venue.hobli}
           </p>
-        </div>
-
-        <div style={{ textAlign: 'center', margin: '14px 0', fontSize: '11px', color: '#776e62' }}>
-          <p style={{ margin: '4px 0', fontWeight: 500 }}>Awaiting your gracious presence:</p>
-          <p style={{ margin: '0' }}>{config.parents.awaitingPresence.join(' · ')}</p>
-          <p style={{ margin: '6px 0 0', fontStyle: 'italic', color: '#a08558' }}>{config.parents.compliments}</p>
-        </div>
-
-        <div style={{ display: 'flex', gap: '16px', flexWrap: 'wrap', alignItems: 'center', justifyContent: 'center', marginTop: '20px' }}>
           <a
-            className="text-link"
-            id="save-date"
-            href="#save-dates"
+            href="https://www.google.com/maps/search/?api=1&query=Suvidha+Resorts+Opp+Acharya+College+Thammenahallipalya+Bangalore"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="venue-map-btn"
+          >
+            📍 Open in Google Maps ↗
+          </a>
+        </div>
+
+        <div className="family-compliments">
+          <p className="awaiting-label">Awaiting your gracious presence:</p>
+          <p className="awaiting-names">{config.parents.awaitingPresence.join(' · ')}</p>
+          <p className="compliments-text">{config.parents.compliments}</p>
+        </div>
+
+        <div className="dialog-footer-actions">
+          <button
+            type="button"
+            className="dialog-save-btn"
             onClick={downloadIcs}
           >
-            Save the dates ↗
-          </a>
+            Save to Phone Calendar 📅
+          </button>
         </div>
       </dialog>
 
-      {/* ── BACKGROUND MUSIC (Starts directly from "Kanmaniyee..." hook) ── */}
+      {/* ── BACKGROUND MUSIC (Autoplay with immediate play & loop) ── */}
       <audio
         ref={audioRef}
         src="/audio/bg-music.mp3"
         preload="auto"
+        autoPlay
+        playsInline
         style={{ display: 'none' }}
-        onLoadedMetadata={(e) => {
-          if (e.currentTarget.currentTime < 40) {
-            e.currentTarget.currentTime = 48.7;
+        onCanPlay={() => {
+          if (audioRef.current && audioRef.current.currentTime < 40) {
+            try {
+              audioRef.current.currentTime = KANMANIYE_CUE;
+            } catch {
+              // ignore
+            }
+          }
+          if (audioRef.current && audioRef.current.paused) {
+            audioRef.current.play().then(() => {
+              setIsAudioPlaying(true);
+              setIsMuted(false);
+            }).catch(() => {});
           }
         }}
+        onPlay={() => {
+          setIsAudioPlaying(true);
+          setIsMuted(false);
+        }}
+        onPause={() => {
+          setIsAudioPlaying(false);
+        }}
         onEnded={(e) => {
-          // Loop seamlessly back to "Kanmaniyee..." rather than the full intro
-          e.currentTarget.currentTime = 48.7;
+          e.currentTarget.currentTime = KANMANIYE_CUE;
           e.currentTarget.play().catch(() => {});
         }}
       />
