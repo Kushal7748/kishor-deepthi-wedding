@@ -13,7 +13,6 @@ const CHAPTER_NAMES = [
 ];
 const DURATION = 50.416667;
 const FRAME = 1 / 24;
-const KANMANIYE_CUE = 48.7;
 
 export const CanvasFilmJourney: React.FC = () => {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -40,7 +39,6 @@ export const CanvasFilmJourney: React.FC = () => {
   const [mediaStatus, setMediaStatus] = useState('');
   const [isMuted, setIsMuted] = useState(false);
   const [isAudioPlaying, setIsAudioPlaying] = useState(false);
-  const [isAutoScrolling, setIsAutoScrolling] = useState(true);
 
   // Cache chapter copy elements on mount
   useEffect(() => {
@@ -56,15 +54,8 @@ export const CanvasFilmJourney: React.FC = () => {
     const audio = audioRef.current;
     if (!audio) return;
 
-    if (audio.currentTime < 40 && audio.readyState >= 1) {
-      try {
-        audio.currentTime = KANMANIYE_CUE;
-      } catch {
-        // seek on loaded
-      }
-    }
     audio.muted = false;
-    audio.volume = 0.7;
+    audio.volume = 1.0;
 
     const playPromise = audio.play();
     if (playPromise !== undefined) {
@@ -74,26 +65,29 @@ export const CanvasFilmJourney: React.FC = () => {
           setIsMuted(false);
         })
         .catch(() => {
-          // Browser autoplay restriction: will be unlocked on the very first touch/scroll
+          // Waiting for first user touch to unlock unmuted sound
         });
     }
   }, []);
 
   useEffect(() => {
-    // Attempt instant autoplay directly as soon as the site opens
+    // Attempt instant playback directly as soon as the component loads
     startAudioPlayback();
 
-    // Universal gesture unlocker: starts unmuted sound the moment user touches anywhere on mobile
+    // Universal gesture unlocker: starts unmuted sound the instant user touches anywhere
     const unlockAudio = () => {
-      startAudioPlayback();
-      const events = ['touchstart', 'touchend', 'click', 'pointerdown', 'scroll', 'keydown'];
-      events.forEach((ev) => {
-        window.removeEventListener(ev, unlockAudio, true);
-        document.removeEventListener(ev, unlockAudio, true);
-      });
+      const audio = audioRef.current;
+      if (audio) {
+        audio.muted = false;
+        audio.volume = 1.0;
+        audio.play().then(() => {
+          setIsAudioPlaying(true);
+          setIsMuted(false);
+        }).catch(() => {});
+      }
     };
 
-    const events = ['touchstart', 'touchend', 'click', 'pointerdown', 'scroll', 'keydown'];
+    const events = ['touchstart', 'touchend', 'click', 'pointerdown', 'mousedown', 'scroll', 'keydown'];
     events.forEach((ev) => {
       window.addEventListener(ev, unlockAudio, { capture: true, passive: true });
       document.addEventListener(ev, unlockAudio, { capture: true, passive: true });
@@ -146,7 +140,6 @@ export const CanvasFilmJourney: React.FC = () => {
           window.setTimeout(() => {
             if (autoPlayEnabledRef.current && !document.querySelector('dialog[open]')) {
               playerRef.current?.play();
-              setIsAutoScrolling(true);
             }
           }, holdMs);
         }
@@ -229,7 +222,6 @@ export const CanvasFilmJourney: React.FC = () => {
         window.setTimeout(() => {
           if (autoPlayEnabledRef.current && !document.querySelector('dialog[open]')) {
             player.play();
-            setIsAutoScrolling(true);
           }
         }, 800);
 
@@ -238,9 +230,6 @@ export const CanvasFilmJourney: React.FC = () => {
       },
       onFrame(time) {
         updateChapter(time);
-      },
-      onPlayStateChange(playing) {
-        setIsAutoScrolling(playing);
       },
       onEnd() {
         // At the end of the film journey, hold for 3.5 seconds on the final promise
@@ -251,7 +240,6 @@ export const CanvasFilmJourney: React.FC = () => {
             window.setTimeout(() => {
               if (autoPlayEnabledRef.current && !document.querySelector('dialog[open]')) {
                 player.play();
-                setIsAutoScrolling(true);
               }
             }, 600);
           }
@@ -300,7 +288,6 @@ export const CanvasFilmJourney: React.FC = () => {
       idleResumeTimerRef.current = window.setTimeout(() => {
         if (autoPlayEnabledRef.current && !document.querySelector('dialog[open]')) {
           playerRef.current?.play();
-          setIsAutoScrolling(true);
         }
       }, delay);
     };
@@ -410,36 +397,15 @@ export const CanvasFilmJourney: React.FC = () => {
     }
   };
 
-  // Auto-scroll toggle
-  const toggleAutoScroll = () => {
-    const player = playerRef.current;
-    if (!player) return;
-    if (isAutoScrolling) {
-      player.pause();
-      autoPlayEnabledRef.current = false;
-      setIsAutoScrolling(false);
-      clearTimeout(idleResumeTimerRef.current);
-    } else {
-      autoPlayEnabledRef.current = true;
-      setIsAutoScrolling(true);
-      player.play();
-    }
-  };
-
   // Music mute/play toggle
-  const toggleMusic = () => {
+  const toggleMusic = (e: React.MouseEvent) => {
+    e.stopPropagation();
     const audio = audioRef.current;
     if (!audio) return;
 
     if (audio.paused) {
-      if (audio.currentTime < 40 && audio.readyState >= 1) {
-        try {
-          audio.currentTime = KANMANIYE_CUE;
-        } catch {
-          // ignore
-        }
-      }
       audio.muted = false;
+      audio.volume = 1.0;
       audio.play().then(() => {
         setIsAudioPlaying(true);
         setIsMuted(false);
@@ -468,7 +434,6 @@ export const CanvasFilmJourney: React.FC = () => {
     document.body.style.overflow = '';
     if (autoPlayEnabledRef.current) {
       playerRef.current?.play();
-      setIsAutoScrolling(true);
     }
   };
 
@@ -540,7 +505,7 @@ export const CanvasFilmJourney: React.FC = () => {
           aria-label="A journey to our beginning"
         >
           <div ref={stageRef} className="journey-stage">
-            {/* ── HEADER (Optimized for Mobile Phone Touch & Layout) ── */}
+            {/* ── HEADER (Uncluttered, No Auto-Scroll Button) ────── */}
             <header className="site-header">
               <a
                 className="header-link header-badge"
@@ -551,29 +516,20 @@ export const CanvasFilmJourney: React.FC = () => {
                 Wedding Details <span aria-hidden="true">↗</span>
               </a>
 
-              <div className="header-controls">
-                <button
-                  type="button"
-                  className={`ctrl-badge autoscroll-toggle ${isAutoScrolling ? 'is-active' : ''}`}
-                  aria-label={isAutoScrolling ? 'Pause auto-scrolling' : 'Resume auto-scrolling'}
-                  onClick={toggleAutoScroll}
-                  title="Toggle auto-scrolling"
-                >
-                  <span className={`ctrl-dot ${isAutoScrolling ? 'pulsing' : ''}`} />
-                  <span>{isAutoScrolling ? 'Auto-scroll ON' : 'Paused'}</span>
-                </button>
-
-                <button
-                  type="button"
-                  className={`ctrl-badge music-toggle ${isAudioPlaying && !isMuted ? 'is-active' : 'is-muted'}`}
-                  aria-label={isAudioPlaying && !isMuted ? 'Mute background song' : 'Play background song'}
-                  onClick={toggleMusic}
-                  title={isAudioPlaying && !isMuted ? 'Song playing (Tap to mute)' : 'Song muted (Tap to play)'}
-                >
-                  <span className="ctrl-icon">{isAudioPlaying && !isMuted ? '🔊' : '🔇'}</span>
-                  <span>{isAudioPlaying && !isMuted ? 'Music ON' : 'Music OFF'}</span>
-                </button>
-              </div>
+              <button
+                type="button"
+                className={`music-toggle-btn ${isAudioPlaying && !isMuted ? 'is-playing' : 'is-muted'}`}
+                aria-label={isAudioPlaying && !isMuted ? 'Mute background song' : 'Play background song'}
+                onClick={toggleMusic}
+                title={isAudioPlaying && !isMuted ? 'Song playing (Tap to mute)' : 'Song muted (Tap to play)'}
+              >
+                <span className="music-wave" aria-hidden="true">
+                  <i />
+                  <i />
+                  <i />
+                </span>
+                <span>{isAudioPlaying && !isMuted ? '♪ Music' : '♪ Music OFF'}</span>
+              </button>
             </header>
 
             {/* ── CINEMATIC FILM CANVAS ─────────────────────────── */}
@@ -916,28 +872,23 @@ export const CanvasFilmJourney: React.FC = () => {
         </div>
       </dialog>
 
-      {/* ── BACKGROUND MUSIC (Autoplay with immediate play & loop) ── */}
+      {/* ── BACKGROUND MUSIC (Plays from 0:00 without seek loop) ── */}
       <audio
         ref={audioRef}
         src="/audio/bg-music.mp3"
         preload="auto"
         autoPlay
+        loop
         playsInline
-        style={{ display: 'none' }}
-        onCanPlay={() => {
-          if (audioRef.current && audioRef.current.currentTime < 40) {
-            try {
-              audioRef.current.currentTime = KANMANIYE_CUE;
-            } catch {
-              // ignore
-            }
-          }
-          if (audioRef.current && audioRef.current.paused) {
-            audioRef.current.play().then(() => {
-              setIsAudioPlaying(true);
-              setIsMuted(false);
-            }).catch(() => {});
-          }
+        aria-hidden="true"
+        style={{
+          position: 'fixed',
+          top: -9999,
+          left: -9999,
+          width: 1,
+          height: 1,
+          opacity: 0,
+          pointerEvents: 'none',
         }}
         onPlay={() => {
           setIsAudioPlaying(true);
@@ -945,10 +896,6 @@ export const CanvasFilmJourney: React.FC = () => {
         }}
         onPause={() => {
           setIsAudioPlaying(false);
-        }}
-        onEnded={(e) => {
-          e.currentTarget.currentTime = KANMANIYE_CUE;
-          e.currentTarget.play().catch(() => {});
         }}
       />
     </>
