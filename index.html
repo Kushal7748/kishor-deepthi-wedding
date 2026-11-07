@@ -14,37 +14,8 @@
       href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;0,500;0,600;1,300;1,400;1,500;1,600&family=DM+Sans:wght@400;500;600&family=Inter:wght@300;400;500&display=swap"
       rel="stylesheet"
     />
-    <link rel="preload" as="image" href="/poster.jpg" />
-    <link rel="preload" as="audio" href="/audio/bg-music.mp3" type="audio/mpeg" />
   </head>
   <body>
-    <audio
-      id="bg-music-audio"
-      src="/audio/bg-music.mp3"
-      preload="auto"
-      autoplay
-      loop
-      playsinline
-      style="position:fixed;top:-9999px;left:-9999px;width:1px;height:1px;opacity:0;pointer-events:none;"
-    ></audio>
-    <script>
-      (function() {
-        var audio = document.getElementById('bg-music-audio');
-        function playMusic() {
-          if (audio && audio.paused) {
-            audio.muted = false;
-            audio.volume = 1.0;
-            audio.play().catch(function() {});
-          }
-        }
-        playMusic();
-        window.addEventListener('load', playMusic);
-        ['touchstart', 'touchend', 'click', 'pointerdown', 'mousedown', 'keydown', 'scroll', 'wheel'].forEach(function(ev) {
-          window.addEventListener(ev, playMusic, { capture: true, passive: true });
-          document.addEventListener(ev, playMusic, { capture: true, passive: true });
-        });
-      })();
-    </script>
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>

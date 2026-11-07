@@ -23,6 +23,7 @@ export const CanvasFilmJourney: React.FC = () => {
   const progressFillRef = useRef<HTMLSpanElement | null>(null);
   const loaderFillRef = useRef<HTMLSpanElement | null>(null);
   const detailsDialogRef = useRef<HTMLDialogElement | null>(null);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
   const chapterCopiesRef = useRef<HTMLElement[]>([]);
 
   const playerRef = useRef<FramePlayer | null>(null);
@@ -30,10 +31,11 @@ export const CanvasFilmJourney: React.FC = () => {
   const autoHoldUntilRef = useRef<number>(0);
   const idleResumeTimerRef = useRef<number>(0);
   const autoPlayEnabledRef = useRef<boolean>(true);
+  const hasUserTappedAudioRef = useRef<boolean>(false);
 
   const [loading, setLoading] = useState(true);
   const [loadPct, setLoadPct] = useState(0);
-  const [loadLabel, setLoadLabel] = useState('Preparing your journey…');
+  const [loadLabel, setLoadLabel] = useState('Opening invitation…');
   const [activeChapter, setActiveChapter] = useState(0);
   const [mediaStatus, setMediaStatus] = useState('');
 
@@ -45,11 +47,15 @@ export const CanvasFilmJourney: React.FC = () => {
   }, []);
 
   // ─────────────────────────────────────────────────────────────
-  // 1. BACKGROUND MUSIC (Automatic Playback Directly from Open)
+  // 1. TAP-TO-PLAY AUDIO CONTROLLER
   // ─────────────────────────────────────────────────────────────
-  const playBackgroundMusic = useCallback(() => {
-    const audio = document.getElementById('bg-music-audio') as HTMLAudioElement | null;
-    if (audio && audio.paused) {
+  // Silent by default. Song ONLY starts when the user taps anywhere on the screen.
+  // If the user does not tap, the visual journey completes silently without song.
+  const triggerAudioOnTap = useCallback(() => {
+    const audio = audioRef.current;
+    if (!audio) return;
+    hasUserTappedAudioRef.current = true;
+    if (audio.paused) {
       audio.muted = false;
       audio.volume = 1.0;
       audio.play().catch(() => {});
@@ -57,27 +63,26 @@ export const CanvasFilmJourney: React.FC = () => {
   }, []);
 
   useEffect(() => {
-    // Attempt playback immediately upon opening
-    playBackgroundMusic();
-
-    // Universal unlocker: ensures unmuted playback starts on the very first touch/gesture
-    const onUserInteract = () => {
-      playBackgroundMusic();
+    const onFirstUserTap = () => {
+      triggerAudioOnTap();
+      ['pointerdown', 'touchstart', 'click'].forEach((ev) => {
+        window.removeEventListener(ev, onFirstUserTap, true);
+        document.removeEventListener(ev, onFirstUserTap, true);
+      });
     };
 
-    const events = ['touchstart', 'touchend', 'click', 'pointerdown', 'mousedown', 'scroll', 'keydown'];
-    events.forEach((ev) => {
-      window.addEventListener(ev, onUserInteract, { capture: true, passive: true });
-      document.addEventListener(ev, onUserInteract, { capture: true, passive: true });
+    ['pointerdown', 'touchstart', 'click'].forEach((ev) => {
+      window.addEventListener(ev, onFirstUserTap, { capture: true, passive: true });
+      document.addEventListener(ev, onFirstUserTap, { capture: true, passive: true });
     });
 
     return () => {
-      events.forEach((ev) => {
-        window.removeEventListener(ev, onUserInteract, true);
-        document.removeEventListener(ev, onUserInteract, true);
+      ['pointerdown', 'touchstart', 'click'].forEach((ev) => {
+        window.removeEventListener(ev, onFirstUserTap, true);
+        document.removeEventListener(ev, onFirstUserTap, true);
       });
     };
-  }, [playBackgroundMusic]);
+  }, [triggerAudioOnTap]);
 
   // ─────────────────────────────────────────────────────────────
   // 2. HERO DEPTH MOTION (subtle parallax)
@@ -94,7 +99,7 @@ export const CanvasFilmJourney: React.FC = () => {
   }, []);
 
   // ─────────────────────────────────────────────────────────────
-  // 3. CHAPTER VISIBILITY & OPACITY TRANSITIONS
+  // 3. CHAPTER VISIBILITY & OPACITY TRANSITIONS + AUDIO SYNC
   // ─────────────────────────────────────────────────────────────
   const updateChapter = useCallback(
     (time: number) => {
@@ -165,6 +170,17 @@ export const CanvasFilmJourney: React.FC = () => {
         progressFillRef.current.style.transform = `scaleX(${progress})`;
       }
 
+      // Synchronize audio fade-out at the end of the 50.4s single loop
+      const audio = audioRef.current;
+      if (audio && !audio.paused && hasUserTappedAudioRef.current) {
+        if (time >= 49.0) {
+          const remainingRatio = Math.max(0, (DURATION - time) / 1.4);
+          audio.volume = Math.min(1.0, Math.max(0, remainingRatio));
+        } else {
+          audio.volume = 1.0;
+        }
+      }
+
       // Update hero subtle depth motion
       updateHeroDepth(time);
     },
@@ -187,7 +203,7 @@ export const CanvasFilmJourney: React.FC = () => {
       onProgress(ratio, label) {
         const pct = Math.round(ratio * 100);
         setLoadPct(pct);
-        setLoadLabel(label || 'Preparing your journey…');
+        setLoadLabel(label || 'Opening invitation…');
         if (loaderFillRef.current) {
           loaderFillRef.current.style.transform = `scaleX(${ratio})`;
         }
@@ -196,32 +212,42 @@ export const CanvasFilmJourney: React.FC = () => {
         setLoading(false);
         setMediaStatus('');
 
-        // Start film playback smoothly directly upon opening
+        // Start film playback smoothly upon opening (audio remains silent unless tapped)
         window.setTimeout(() => {
           if (autoPlayEnabledRef.current && !document.querySelector('dialog[open]')) {
             player.play();
           }
-        }, 800);
-
-        // Directly kick off audio playback
-        playBackgroundMusic();
+        }, 500);
       },
       onFrame(time) {
         updateChapter(time);
       },
       onEnd() {
-        // At the end of the film journey, hold for 3.5 seconds on the final promise
-        // and then smoothly loop back to Chapter 1 (The Beginning)
+        // Single visual loop completed: reset song to start so it never runs into later lyrics
+        const audio = audioRef.current;
+        if (audio) {
+          audio.pause();
+          audio.currentTime = 0;
+          audio.volume = 1.0;
+        }
+
+        // Hold on final frame for 3.2s, then loop back to Chapter 1
         window.setTimeout(() => {
           if (autoPlayEnabledRef.current && !document.querySelector('dialog[open]')) {
             player.seek(0);
             window.setTimeout(() => {
               if (autoPlayEnabledRef.current && !document.querySelector('dialog[open]')) {
                 player.play();
+                // If user had tapped, restart song from the very first note
+                if (hasUserTappedAudioRef.current && audioRef.current) {
+                  audioRef.current.currentTime = 0;
+                  audioRef.current.volume = 1.0;
+                  audioRef.current.play().catch(() => {});
+                }
               }
-            }, 600);
+            }, 500);
           }
-        }, 3500);
+        }, 3200);
       },
       onError(err) {
         console.warn('Player issue:', err);
@@ -252,7 +278,7 @@ export const CanvasFilmJourney: React.FC = () => {
       clearTimeout(idleResumeTimerRef.current);
       player.dispose();
     };
-  }, [updateChapter, updateHeroDepth, playBackgroundMusic]);
+  }, [updateChapter, updateHeroDepth]);
 
   // ─────────────────────────────────────────────────────────────
   // 5. TOUCH & SCROLL CONTROLLERS (WITH SEAMLESS AUTO-RESUME)
@@ -351,6 +377,14 @@ export const CanvasFilmJourney: React.FC = () => {
   const handleNextChapter = () => {
     if (activeChapter >= STARTS.length - 1) {
       playerRef.current?.seek(0);
+      const audio = audioRef.current;
+      if (audio) {
+        audio.currentTime = 0;
+        audio.volume = 1.0;
+        if (hasUserTappedAudioRef.current) {
+          audio.play().catch(() => {});
+        }
+      }
       if (autoPlayEnabledRef.current) {
         playerRef.current?.play();
       }
@@ -379,7 +413,6 @@ export const CanvasFilmJourney: React.FC = () => {
   const openCelebrations = (e: React.MouseEvent) => {
     e.preventDefault();
     playerRef.current?.pause();
-    playBackgroundMusic();
     detailsDialogRef.current?.showModal();
     document.body.style.overflow = 'hidden';
   };
@@ -460,7 +493,7 @@ export const CanvasFilmJourney: React.FC = () => {
           aria-label="A journey to our beginning"
         >
           <div ref={stageRef} className="journey-stage">
-            {/* ── HEADER (Pure & Minimal — No Buttons) ──────────── */}
+            {/* ── HEADER (Clean & Minimal — No Buttons) ──────────── */}
             <header className="site-header">
               <a
                 className="header-link header-badge"
@@ -811,6 +844,25 @@ export const CanvasFilmJourney: React.FC = () => {
           </button>
         </div>
       </dialog>
+
+      {/* ── BACKGROUND MUSIC (Tap-to-play, zero eager network payload, loop-synced) ── */}
+      <audio
+        ref={audioRef}
+        src="/audio/bg-music.mp3"
+        preload="none"
+        loop={false}
+        playsInline
+        aria-hidden="true"
+        style={{
+          position: 'fixed',
+          top: -9999,
+          left: -9999,
+          width: 1,
+          height: 1,
+          opacity: 0,
+          pointerEvents: 'none',
+        }}
+      />
     </>
   );
 };

@@ -337,10 +337,10 @@ export class FramePlayer {
       this.resize();
       this.store.bootstrap();
 
-      // Instant startup: warm initial sheets for zero-wait smooth playback
-      this.onProgress?.(0.5, 'Preparing your journey…');
-      await Promise.all([this.warmSheet(0), this.warmSheet(1)]);
-      this.warmSheet(2).catch(() => {});
+      // Ultra-low latency startup: warm sheet 0 and stream ahead immediately
+      this.onProgress?.(0.7, 'Opening invitation…');
+      await this.warmSheet(0);
+      this.warmSheet(1).catch(() => {});
 
       this.ready = true;
       this.onReady?.();
